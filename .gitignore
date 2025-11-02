@@ -1,0 +1,38 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build folders
+bin/
+[Bb]in/
+obj/
+[Oo]bj/
+Debug/
+Release/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+
+# IDE
+*.VC.db
+*.VC.opendb
+
+# Logs
+msbuild.log
+*.tlog
+
+# Generated
+*.ncb
+*.opendb
+
+# Packages/cache
+packages/
+*.nuget.props
+*.nuget.targets
+
+# Others
+Captured/
