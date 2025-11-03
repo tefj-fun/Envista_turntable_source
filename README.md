@@ -61,6 +61,21 @@ DemoApp/
 
 > **Note**: `bin/`, `obj/`, `Captured/`, and other transient build folders are ignored via `.gitignore`.
 
+### Placing the Source Tree
+
+The project assumes it lives directly under the SolVision installation so relative references (for `Solvision.dll`, Huaray SDK binaries, etc.) resolve without manual edits. The recommended layout is:
+
+```
+C:\Solvision installation\SolVision6\Version_6.1.4\SampleCode\C_Sharp\DemoApp\
+    DemoApp.sln
+    DemoApp\DemoApp.csproj
+    DemoApp\Dependencies\Huaray\...
+    dll\Solvision.dll
+    (etc.)
+```
+
+If you copy the repo elsewhere, update the hint paths in `DemoApp.csproj` (for example the `..\..\..\..\Solvision.dll` entries and the copy directives for `Dependencies\Huaray`) so Visual Studio can find the SDK files.
+
 ---
 
 ## Prerequisites
