@@ -1,6 +1,7 @@
-﻿using System;
-using System.Windows.Forms;
+using System;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
 
 namespace DemoApp
 {
@@ -15,7 +16,24 @@ namespace DemoApp
             EnableHighDpiAwareness();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new DemoApp());
+
+            SplashScreenManager.Show();
+
+            DemoApp mainForm = null;
+            try
+            {
+                mainForm = new DemoApp();
+            }
+            catch (Exception ex)
+            {
+                SplashScreenManager.Close();
+                MessageBox.Show($"Failed to start Envista Turntable Demo:\n{ex}", "Startup Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            SplashScreenManager.Close();
+            Application.Run(mainForm);
         }
 
         private static void EnableHighDpiAwareness()
@@ -35,6 +53,54 @@ namespace DemoApp
             catch (DllNotFoundException)
             {
                 // Ignore; process will fall back to system DPI awareness
+            }
+        }
+
+        private static class SplashScreenManager
+        {
+            private static Thread splashThread;
+            private static LoadingForm splashForm;
+
+            public static void Show()
+            {
+                if (splashThread != null)
+                {
+                    return;
+                }
+
+                splashThread = new Thread(() =>
+                {
+                    splashForm = new LoadingForm();
+                    Application.Run(splashForm);
+                })
+                {
+                    IsBackground = true
+                };
+                splashThread.SetApartmentState(ApartmentState.STA);
+                splashThread.Start();
+            }
+
+            public static void Close()
+            {
+                if (splashForm == null)
+                {
+                    return;
+                }
+
+                try
+                {
+                    splashForm.Invoke(new Action(() => splashForm.Close()));
+                    splashThread?.Join(500);
+                }
+                catch (InvalidOperationException)
+                {
+                    // Splash already closed
+                }
+                finally
+                {
+                    splashForm = null;
+                    splashThread = null;
+                }
             }
         }
 

@@ -137,6 +137,16 @@ namespace DemoApp
         private CancellationTokenSource captureSequenceCts;
         private bool showFrontOverlay = true;
         private int selectedFrontSequence = -1;
+        private static readonly object consoleCaptureLock = new object();
+        private static bool consoleCaptureInitialized;
+        private static ConsoleRedirectWriter consoleOutInterceptor;
+        private static ConsoleRedirectWriter consoleErrorInterceptor;
+        private static TextWriter consoleOutOriginal;
+        private static TextWriter consoleErrorOriginal;
+        private readonly object sdkTaskLock = new object();
+        private readonly Queue<string> sdkTaskQueue = new Queue<string>();
+        private readonly object consoleQueueLock = new object();
+        private readonly Queue<Tuple<LogStatus, string>> consolePendingQueue = new Queue<Tuple<LogStatus, string>>();
         private bool responsiveLayoutInitialized;
         private bool usingCompactLayout;
         private const int CompactLayoutWidthThreshold = 1400;
@@ -146,6 +156,7 @@ namespace DemoApp
         public DemoApp()
         {
             InitializeComponent();
+            EnsureConsoleCapture();
             StartPosition = FormStartPosition.CenterScreen;
             WindowState = FormWindowState.Maximized;
             initSettingsPath = Path.Combine(
@@ -185,6 +196,36 @@ namespace DemoApp
             Shown += DemoApp_Shown;
         }
 
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            DrainPendingConsoleQueue();
+        }
+
+        private void DrainPendingConsoleQueue()
+        {
+            Queue<Tuple<LogStatus, string>> pending = null;
+            lock (consoleQueueLock)
+            {
+                if (consolePendingQueue.Count > 0)
+                {
+                    pending = new Queue<Tuple<LogStatus, string>>(consolePendingQueue);
+                    consolePendingQueue.Clear();
+                }
+            }
+
+            if (pending == null || pending.Count == 0)
+            {
+                return;
+            }
+
+            while (pending.Count > 0)
+            {
+                Tuple<LogStatus, string> entry = pending.Dequeue();
+                ProcessSdkLogLine(entry.Item2, entry.Item1);
+            }
+        }
+
         private Font ScaleFont(string family, float size, FontStyle style = FontStyle.Regular, GraphicsUnit unit = GraphicsUnit.Point)
         {
             float scaledSize = Math.Max(1f, size * CurrentDpiScale);
@@ -211,6 +252,148 @@ namespace DemoApp
             {
                 ShowInitializationWizard("Complete the initialization wizard before beginning the workflow.");
             }
+        }
+
+        private void EnsureConsoleCapture()
+        {
+            lock (consoleCaptureLock)
+            {
+                if (consoleCaptureInitialized)
+                {
+                    return;
+                }
+
+                consoleOutOriginal = Console.Out;
+                consoleErrorOriginal = Console.Error;
+
+                consoleOutInterceptor = new ConsoleRedirectWriter(consoleOutOriginal, HandleSdkConsoleMessage, LogStatus.Info);
+                consoleErrorInterceptor = new ConsoleRedirectWriter(consoleErrorOriginal, HandleSdkConsoleMessage, LogStatus.Error);
+
+                Console.SetOut(consoleOutInterceptor);
+                Console.SetError(consoleErrorInterceptor);
+
+                consoleCaptureInitialized = true;
+            }
+        }
+
+        private void ReleaseConsoleCapture()
+        {
+            lock (consoleCaptureLock)
+            {
+                if (!consoleCaptureInitialized)
+                {
+                    return;
+                }
+
+                consoleOutInterceptor?.FlushPending();
+                consoleErrorInterceptor?.FlushPending();
+
+                if (consoleOutOriginal != null)
+                {
+                    Console.SetOut(consoleOutOriginal);
+                }
+
+                if (consoleErrorOriginal != null)
+                {
+                    Console.SetError(consoleErrorOriginal);
+                }
+
+                consoleOutInterceptor?.Dispose();
+                consoleErrorInterceptor?.Dispose();
+                consoleOutInterceptor = null;
+                consoleErrorInterceptor = null;
+                consoleCaptureInitialized = false;
+            }
+        }
+
+        private void HandleSdkConsoleMessage(LogStatus status, string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return;
+            }
+
+            string trimmed = message.Trim();
+            if (!IsHandleCreated)
+            {
+                lock (consoleQueueLock)
+                {
+                    consolePendingQueue.Enqueue(Tuple.Create(status, trimmed));
+                }
+                return;
+            }
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action(() => HandleSdkConsoleMessage(status, trimmed)));
+                }
+                catch (InvalidOperationException)
+                {
+                    lock (consoleQueueLock)
+                    {
+                        consolePendingQueue.Enqueue(Tuple.Create(status, trimmed));
+                    }
+                }
+                return;
+            }
+
+            ProcessSdkLogLine(trimmed, status);
+        }
+
+        private void ProcessSdkLogLine(string message, LogStatus defaultStatus)
+        {
+            if (string.IsNullOrEmpty(message))
+            {
+                return;
+            }
+
+            if (message.StartsWith("TaskProcess:", StringComparison.OrdinalIgnoreCase))
+            {
+                string detail = ExtractAfter(message, "TaskProcess:").Trim();
+                if (string.IsNullOrEmpty(detail))
+                {
+                    detail = "TaskProcess";
+                }
+
+                lock (sdkTaskLock)
+                {
+                    sdkTaskQueue.Enqueue(detail);
+                }
+
+                outToLog(message, LogStatus.Progress);
+                return;
+            }
+
+            if (message.StartsWith("------task", StringComparison.OrdinalIgnoreCase))
+            {
+                string taskName = null;
+                lock (sdkTaskLock)
+                {
+                    if (sdkTaskQueue.Count > 0)
+                    {
+                        taskName = sdkTaskQueue.Dequeue();
+                    }
+                }
+
+                Match match = Regex.Match(message, @"^-{6}task\s+(?<index>\d+)\s*:\s*(?<duration>\d+)\s*ms", RegexOptions.IgnoreCase);
+                string duration = match.Success ? match.Groups["duration"].Value : null;
+
+                if (!string.IsNullOrEmpty(taskName))
+                {
+                    string completion = !string.IsNullOrEmpty(duration)
+                        ? $"Task '{taskName}' completed in {duration} ms."
+                        : $"Task '{taskName}' completed.";
+                    outToLog(completion, LogStatus.Success);
+                    return;
+                }
+
+                outToLog(message, LogStatus.Success);
+                return;
+            }
+
+            outToLog(message, defaultStatus);
         }
 
 
@@ -253,6 +436,8 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
 
     currentImage?.Dispose();
+
+    ReleaseConsoleCapture();
 
 }
 
@@ -3849,7 +4034,8 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             else if (text.StartsWith("TaskProcess:", StringComparison.OrdinalIgnoreCase))
             {
                 string detail = ExtractAfter(text, "TaskProcess:");
-                description = $"Task process event: {detail}.";
+                string taskLabel = string.IsNullOrWhiteSpace(detail) ? "process" : detail.Trim();
+                description = $"Task '{taskLabel}' started.";
             }
             else if (text.StartsWith("GPUIndex", StringComparison.OrdinalIgnoreCase))
             {
@@ -4511,17 +4697,10 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             tabLogicBuilder.Controls.Add(logicRootLayout);
 
-            if (leftTabs.TabPages.Contains(tabWorkflow))
-            {
-                leftTabs.TabPages.Remove(tabWorkflow);
-            }
-            if (leftTabs.TabPages.Contains(tabLogicBuilder))
-            {
-                leftTabs.TabPages.Remove(tabLogicBuilder);
-            }
-
-            leftTabs.TabPages.Insert(0, tabWorkflow);
+            leftTabs.TabPages.Clear();
+            leftTabs.TabPages.Add(tabWorkflow);
             leftTabs.TabPages.Add(tabLogicBuilder);
+            leftTabs.SelectedTab = tabWorkflow;
         }
 
         private TableLayoutPanel BuildInitializationLayout()
@@ -5558,19 +5737,38 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 panelStepsHost.Padding = new Padding(0);
                 panelStepsHost.AutoScroll = true;
 
+                Control primaryHost = null;
+                if (leftTabs != null && !leftTabs.IsDisposed)
+                {
+                    primaryHost = leftTabs;
+                    leftTabs.Dock = DockStyle.Fill;
+                    leftTabs.Margin = new Padding(0);
+                }
+                else if (panelStepsHost != null)
+                {
+                    primaryHost = panelStepsHost;
+                }
+                else
+                {
+                    primaryHost = tableLayoutSteps;
+                }
+
                 if (shouldCompact)
                 {
                     tableLayoutPanelMain.ColumnCount = 1;
                     tableLayoutPanelMain.RowCount = 2;
                     tableLayoutPanelMain.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-                    tableLayoutPanelMain.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-                    tableLayoutPanelMain.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+                    tableLayoutPanelMain.RowStyles.Add(new RowStyle(SizeType.Percent, 52F));
+                    tableLayoutPanelMain.RowStyles.Add(new RowStyle(SizeType.Percent, 48F));
 
-                    panelStepsHost.Margin = new Padding(0, 0, 0, 12);
+                    if (primaryHost != null)
+                    {
+                        primaryHost.Margin = new Padding(0, 0, 0, ScaleSize(12));
+                    }
                     tableLayoutImages.Dock = DockStyle.Fill;
                     tableLayoutImages.Margin = new Padding(0);
 
-                    tableLayoutPanelMain.Controls.Add(panelStepsHost, 0, 0);
+                    tableLayoutPanelMain.Controls.Add(primaryHost, 0, 0);
                     tableLayoutPanelMain.Controls.Add(tableLayoutImages, 0, 1);
                 }
                 else
@@ -5581,11 +5779,14 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                     tableLayoutPanelMain.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62F));
                     tableLayoutPanelMain.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
-                    panelStepsHost.Margin = new Padding(0, 0, 12, 0);
+                    if (primaryHost != null)
+                    {
+                        primaryHost.Margin = new Padding(0, 0, ScaleSize(12), 0);
+                    }
                     tableLayoutImages.Dock = DockStyle.Fill;
                     tableLayoutImages.Margin = new Padding(0);
 
-                    tableLayoutPanelMain.Controls.Add(panelStepsHost, 0, 0);
+                    tableLayoutPanelMain.Controls.Add(primaryHost, 0, 0);
                     tableLayoutPanelMain.Controls.Add(tableLayoutImages, 1, 0);
                 }
 
@@ -6924,6 +7125,130 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             }
 
+        }
+        private sealed class ConsoleRedirectWriter : TextWriter
+        {
+            private readonly TextWriter originalWriter;
+            private readonly Action<LogStatus, string> lineHandler;
+            private readonly LogStatus defaultStatus;
+            private readonly StringBuilder buffer = new StringBuilder();
+            private readonly object syncRoot = new object();
+
+            public ConsoleRedirectWriter(TextWriter originalWriter, Action<LogStatus, string> lineHandler, LogStatus defaultStatus)
+            {
+                this.originalWriter = originalWriter ?? TextWriter.Null;
+                this.lineHandler = lineHandler;
+                this.defaultStatus = defaultStatus;
+            }
+
+            public override Encoding Encoding => originalWriter.Encoding ?? Encoding.UTF8;
+
+            public override void Write(char value)
+            {
+                originalWriter.Write(value);
+                AppendChar(value);
+            }
+
+            public override void Write(string value)
+            {
+                originalWriter.Write(value);
+                if (value == null)
+                {
+                    return;
+                }
+
+                foreach (char c in value)
+                {
+                    AppendChar(c);
+                }
+            }
+
+            public override void WriteLine(string value)
+            {
+                originalWriter.WriteLine(value);
+                if (value != null)
+                {
+                    foreach (char c in value)
+                    {
+                        AppendChar(c);
+                    }
+                }
+                AppendChar('\n');
+            }
+
+            public override void Flush()
+            {
+                originalWriter.Flush();
+                FlushPending();
+            }
+
+            public void FlushPending()
+            {
+                string line = null;
+                lock (syncRoot)
+                {
+                    if (buffer.Length > 0)
+                    {
+                        line = buffer.ToString();
+                        buffer.Clear();
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(line))
+                {
+                    Emit(line);
+                }
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                {
+                    FlushPending();
+                }
+
+                base.Dispose(disposing);
+            }
+
+            private void AppendChar(char value)
+            {
+                string line = null;
+                lock (syncRoot)
+                {
+                    if (value == '\r')
+                    {
+                        return;
+                    }
+
+                    if (value == '\n')
+                    {
+                        if (buffer.Length > 0)
+                        {
+                            line = buffer.ToString();
+                            buffer.Clear();
+                        }
+                    }
+                    else
+                    {
+                        buffer.Append(value);
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(line))
+                {
+                    Emit(line);
+                }
+            }
+
+            private void Emit(string line)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    return;
+                }
+
+                lineHandler?.Invoke(defaultStatus, line.Trim());
+            }
         }
 
         private sealed class TurntableController : IDisposable
