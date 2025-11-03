@@ -18,6 +18,9 @@ using System.Windows.Forms;
 using System.Windows.Forms.Integration;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
+using System.Drawing.Text;
 using MVSDK_Net;
 
 namespace DemoApp
@@ -77,6 +80,10 @@ namespace DemoApp
         private Button BT_AddGroup;
         private Button BT_RemoveNode;
         private Label LBL_ResultStatus;
+        private GroupBox groupClassRules;
+        private FlowLayoutPanel flowClassRules;
+        private readonly Dictionary<string, ClassRuleCard> classRuleCards = new Dictionary<string, ClassRuleCard>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, Image> glyphImageCache = new Dictionary<string, Image>();
 
         private ModelContext attachmentContext;
         private ModelContext defectContext;
@@ -121,7 +128,10 @@ namespace DemoApp
         private GroupBox groupWorkflowInit;
         private bool initializationPromptShown;
         private InitializationSettings initSettings;
+        private DefectPolicy defectPolicy;
+        private readonly string settingsRootDirectory;
         private readonly string initSettingsPath;
+        private readonly string defectPolicyPath;
         private bool useRecordedRun;
         private string recordedRunPath;
         private CheckBox CHK_UseRecordedRun;
@@ -151,6 +161,7 @@ namespace DemoApp
         private bool usingCompactLayout;
         private const int CompactLayoutWidthThreshold = 1400;
         private const float CompactLayoutDpiThreshold = 1.5f;
+        private const string IconFontFamily = "Segoe MDL2 Assets";
         private float CurrentDpiScale => DeviceDpi / 96f;
 
         public DemoApp()
@@ -159,11 +170,26 @@ namespace DemoApp
             EnsureConsoleCapture();
             StartPosition = FormStartPosition.CenterScreen;
             WindowState = FormWindowState.Maximized;
-            initSettingsPath = Path.Combine(
+            settingsRootDirectory = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "SolVisionDemoApp",
-                "init-settings.ini");
+                "SolVisionDemoApp");
+            try
+            {
+                Directory.CreateDirectory(settingsRootDirectory);
+            }
+            catch
+            {
+                // Safe to ignore; individual save operations handle failures.
+            }
+
+            initSettingsPath = Path.Combine(settingsRootDirectory, "init-settings.ini");
+            defectPolicyPath = Path.Combine(settingsRootDirectory, "defect-policy.json");
             initSettings = InitializationSettings.Load(initSettingsPath);
+            defectPolicy = DefectPolicy.Load(defectPolicyPath);
+            if (defectPolicy == null)
+            {
+                defectPolicy = DefectPolicy.Create();
+            }
             useRecordedRun = initSettings?.UseRecordedRun ?? false;
             recordedRunPath = initSettings?.RecordedRunPath;
             classNameList = new List<string>();
@@ -437,6 +463,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
     currentImage?.Dispose();
 
+    SaveDefectPolicyToDisk();
     ReleaseConsoleCapture();
 
 }
@@ -827,6 +854,54 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
         }
 
+        private void SyncDefectPolicyWithClasses(IEnumerable<string> classes)
+        {
+            if (defectPolicy == null)
+            {
+                defectPolicy = DefectPolicy.Create();
+            }
+
+            if (classes == null)
+            {
+                return;
+            }
+
+            List<string> normalized = classes
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (normalized.Count == 0)
+            {
+                return;
+            }
+
+            bool changed = defectPolicy.SyncWithClasses(normalized);
+            if (changed)
+            {
+                SaveDefectPolicyToDisk();
+            }
+
+            RefreshClassRuleCardsUI();
+        }
+
+        private void SaveDefectPolicyToDisk()
+        {
+            if (defectPolicy == null || string.IsNullOrWhiteSpace(defectPolicyPath))
+            {
+                return;
+            }
+
+            try
+            {
+                defectPolicy.Save(defectPolicyPath);
+            }
+            catch (Exception ex)
+            {
+                outToLog($"[Policy] Failed to save defect policy: {ex.Message}", LogStatus.Warning);
+            }
+        }
+
         private bool IsRecordedRunSelectionValid(out string message)
         {
             message = string.Empty;
@@ -977,18 +1052,18 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             {
                 Text = "Connect",
                 Dock = DockStyle.Fill,
-                Enabled = false,
-                MinimumSize = new Size(ScaleSize(120), ScaleSize(32))
+                Enabled = false
             };
+            ConfigureIconButton(connectButton, "\uE71B", $"Connect {context.RoleName.ToLowerInvariant()} camera", minWidth: 44);
             buttonRow.Controls.Add(connectButton, 0, 0);
 
             captureButton = new Button
             {
                 Text = "Capture Preview",
                 Dock = DockStyle.Fill,
-                Enabled = false,
-                MinimumSize = new Size(ScaleSize(120), ScaleSize(32))
+                Enabled = false
             };
+            ConfigureIconButton(captureButton, "\uE114", $"Capture {context.RoleName.ToLowerInvariant()} preview", minWidth: 44);
             buttonRow.Controls.Add(captureButton, 1, 0);
 
             layout.Controls.Add(buttonRow, 0, 3);
@@ -2776,7 +2851,28 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
         protected void UpdateClassNames(List<string> classNames)
         {
-            classNameList = classNames;
+            List<string> snapshot = classNames != null ? new List<string>(classNames) : new List<string>();
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action(() => HandleClassNameUpdate(snapshot)));
+                }
+                catch (ObjectDisposedException)
+                {
+                    // form is closing; ignore
+                }
+            }
+            else
+            {
+                HandleClassNameUpdate(snapshot);
+            }
+        }
+
+        private void HandleClassNameUpdate(List<string> classes)
+        {
+            classNameList = classes ?? new List<string>();
+            SyncDefectPolicyWithClasses(classNameList);
             if (CB_Field != null && CB_Field.Visible && CB_Field.SelectedValue is LogicField field && field == LogicField.ClassName)
             {
                 UpdateValueSuggestions(LogicField.ClassName, CB_Value?.Text);
@@ -2791,29 +2887,27 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 try
                 {
                     List<string> classNames = target.GetClassNames() ?? new List<string>();
-                    classNames.RemoveAll(p => p.Equals("BackGround", StringComparison.OrdinalIgnoreCase) || p.Equals("Unknown", StringComparison.OrdinalIgnoreCase));
-                    if (classNames.Count == 0)
-                    {
-                        return new List<string> { "Object" };
-                    }
-                    return classNames;
+                    classNames.RemoveAll(name =>
+                        name == null ||
+                        name.Equals("BackGround", StringComparison.OrdinalIgnoreCase) ||
+                        name.Equals("Unknown", StringComparison.OrdinalIgnoreCase) ||
+                        name.Equals("Object", StringComparison.OrdinalIgnoreCase));
+
+                    return classNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 }
                 catch
                 {
-                    return new List<string> { "Object" };
+                    return new List<string>();
                 }
             }
 
-            return new List<string> { "Object" };
+            return new List<string>();
         }
 
         private void RefreshDefectClassNamesFromModel()
         {
-            classNameList = GetClassNames() ?? new List<string>();
-            if (CB_Field != null && CB_Field.SelectedValue is LogicField field && field == LogicField.ClassName)
-            {
-                UpdateValueSuggestions(LogicField.ClassName, CB_Value?.Text);
-            }
+            List<string> classes = GetClassNames() ?? new List<string>();
+            HandleClassNameUpdate(classes);
         }
 
         private void DG_Detections_CellMouseClick(object sender, DataGridViewCellMouseEventArgs e)
@@ -4478,6 +4572,26 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 panelStepsHost.AutoScrollMinSize = new Size(0, preferredSize.Height + ScaleSize(40));
             }
 
+            groupClassRules = new GroupBox
+            {
+                Text = "Defect Class Policy",
+                Dock = DockStyle.Fill,
+                Padding = new Padding(ScaleSize(12), ScaleSize(24), ScaleSize(12), ScaleSize(12)),
+                MinimumSize = new Size(ScaleSize(420), ScaleSize(0)),
+                AutoSize = false
+            };
+
+            flowClassRules = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoScroll = true,
+                Margin = new Padding(ScaleSize(4)),
+                Padding = new Padding(ScaleSize(4))
+            };
+            groupClassRules.Controls.Add(flowClassRules);
+
             groupLogic = new GroupBox
             {
                 Text = "Logic Rules",
@@ -4688,14 +4802,17 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             logicRootLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                RowCount = 2
+                RowCount = 3
             };
             logicRootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 56F));
-            logicRootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            logicRootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 48F));
+            logicRootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 52F));
             logicRootLayout.Controls.Add(logicHeaderPanel, 0, 0);
-            logicRootLayout.Controls.Add(groupLogic, 0, 1);
+            logicRootLayout.Controls.Add(groupClassRules, 0, 1);
+            logicRootLayout.Controls.Add(groupLogic, 0, 2);
 
             tabLogicBuilder.Controls.Add(logicRootLayout);
+            RefreshClassRuleCardsUI();
 
             leftTabs.TabPages.Clear();
             leftTabs.TabPages.Add(tabWorkflow);
@@ -5078,6 +5195,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -5097,6 +5215,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 Dock = DockStyle.Fill
             };
             browseButton.Click += browseHandler;
+            ConfigureIconButton(browseButton, "\uE8B7", $"Browse {title} project");
             layout.Controls.Add(browseButton, 1, 1);
 
             loadButton = new Button
@@ -5106,6 +5225,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 Enabled = false
             };
             loadButton.Click += loadHandler;
+            ConfigureIconButton(loadButton, "\uE74D", $"Load {title} project");
             layout.Controls.Add(loadButton, 2, 1);
 
             statusLabel = new Label
@@ -5152,6 +5272,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 Margin = new Padding(0, 0, 12, 0)
             };
             BT_CameraRefresh.Click += BT_CameraRefresh_Click;
+            ConfigureIconButton(BT_CameraRefresh, "\uE72C", "Refresh camera list", minWidth: 40, fontSize: 16f, customMargin: new Padding(0, 0, ScaleSize(12), 0));
             toolbar.Controls.Add(BT_CameraRefresh);
 
             Label hint = new Label
@@ -5227,16 +5348,17 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
         {
             TableLayoutPanel layout = new TableLayoutPanel
             {
-                ColumnCount = 3,
+                ColumnCount = 4,
                 Dock = DockStyle.Top,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Margin = new Padding(0)
             };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
+            layout.RowCount = 2;
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
@@ -5250,30 +5372,33 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             BT_TurntableRefresh = new Button
             {
                 Text = "Refresh",
-                Dock = DockStyle.Fill
+                Dock = DockStyle.Fill,
+                Margin = new Padding(8, 0, 0, 0)
             };
             BT_TurntableRefresh.Click += BT_TurntableRefresh_Click;
+            ConfigureIconButton(BT_TurntableRefresh, "\uE72C", "Refresh COM ports", customMargin: new Padding(8, 0, 0, 0));
             layout.Controls.Add(BT_TurntableRefresh, 1, 0);
 
             BT_TurntableConnect = new Button
             {
                 Text = "Connect",
-                Dock = DockStyle.Fill
+                Dock = DockStyle.Fill,
+                Margin = new Padding(8, 0, 0, 0)
             };
             BT_TurntableConnect.Click += BT_TurntableConnect_Click;
+            ConfigureIconButton(BT_TurntableConnect, "\uE71B", "Connect turntable", customMargin: new Padding(8, 0, 0, 0));
             layout.Controls.Add(BT_TurntableConnect, 2, 0);
 
             BT_TurntableHome = new Button
             {
                 Text = "Home",
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Margin = new Padding(12, 4, 0, 4),
-                Enabled = false
+                Dock = DockStyle.Fill,
+                Enabled = false,
+                Margin = new Padding(8, 0, 0, 0)
             };
             BT_TurntableHome.Click += BT_TurntableHome_Click;
-            layout.Controls.Add(BT_TurntableHome, 2, 1);
+            ConfigureIconButton(BT_TurntableHome, "\uE80F", "Return to home position", customMargin: new Padding(8, 0, 0, 0));
+            layout.Controls.Add(BT_TurntableHome, 3, 0);
 
             LBL_TurntableStatus = new Label
             {
@@ -5283,8 +5408,8 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 Padding = new Padding(8, 4, 8, 4),
                 Margin = new Padding(0, 8, 0, 0)
             };
-            layout.Controls.Add(LBL_TurntableStatus, 0, 2);
-            layout.SetColumnSpan(LBL_TurntableStatus, 3);
+            layout.Controls.Add(LBL_TurntableStatus, 0, 1);
+            layout.SetColumnSpan(LBL_TurntableStatus, 4);
 
             return layout;
         }
@@ -5578,6 +5703,206 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 builder.AppendLine($"UseRecordedRun={UseRecordedRun}");
                 builder.AppendLine($"RecordedRunPath={RecordedRunPath ?? string.Empty}");
                 File.WriteAllText(path, builder.ToString());
+            }
+        }
+
+        [DataContract]
+        private sealed class DefectPolicy
+        {
+            private static readonly StringComparer ClassComparer = StringComparer.OrdinalIgnoreCase;
+
+            [DataMember(Order = 1)]
+            public int Version { get; set; } = 1;
+
+            [DataMember(Order = 2)]
+            public DateTime LastUpdatedUtc { get; set; } = DateTime.UtcNow;
+
+            [DataMember(Order = 3)]
+            public List<DefectClassRule> ClassRules { get; set; } = new List<DefectClassRule>();
+
+            public static DefectPolicy Create()
+            {
+                return new DefectPolicy();
+            }
+
+            public static DefectPolicy Load(string path)
+            {
+                if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                {
+                    return Create();
+                }
+
+                try
+                {
+                    using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        DataContractJsonSerializer serializer = new DataContractJsonSerializer(typeof(DefectPolicy));
+                        return serializer.ReadObject(stream) as DefectPolicy ?? Create();
+                    }
+                }
+                catch
+                {
+                    return Create();
+                }
+            }
+
+            public void Save(string path)
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    return;
+                }
+
+                string directory = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                LastUpdatedUtc = DateTime.UtcNow;
+                using (FileStream stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    DataContractJsonSerializer serializer = new DataContractJsonSerializer(typeof(DefectPolicy));
+                    serializer.WriteObject(stream, this);
+                }
+            }
+
+            public bool SyncWithClasses(IEnumerable<string> classes)
+            {
+                if (classes == null)
+                {
+                    return false;
+                }
+
+                Dictionary<string, string> canonical = new Dictionary<string, string>(ClassComparer);
+                foreach (string raw in classes)
+                {
+                    if (string.IsNullOrWhiteSpace(raw))
+                    {
+                        continue;
+                    }
+
+                    string trimmed = raw.Trim();
+                    if (!canonical.ContainsKey(trimmed))
+                    {
+                        canonical[trimmed] = trimmed;
+                    }
+                }
+
+                bool changed = false;
+
+                foreach (DefectClassRule rule in ClassRules)
+                {
+                    string ruleName = (rule.ClassName ?? string.Empty).Trim();
+                    if (canonical.TryGetValue(ruleName, out string canonicalName))
+                    {
+                        if (!string.Equals(rule.ClassName, canonicalName, StringComparison.Ordinal))
+                        {
+                            rule.ClassName = canonicalName;
+                            changed = true;
+                        }
+
+                        if (rule.IsStale)
+                        {
+                            rule.IsStale = false;
+                            changed = true;
+                        }
+                    }
+                    else
+                    {
+                        if (!rule.IsStale)
+                        {
+                            rule.IsStale = true;
+                            changed = true;
+                        }
+                    }
+            }
+
+            foreach (string canonicalName in canonical.Values)
+            {
+                if (!ClassRules.Any(rule => ClassComparer.Equals(rule.ClassName, canonicalName)))
+                {
+                    ClassRules.Add(DefectClassRule.Create(canonicalName));
+                    changed = true;
+                }
+            }
+
+            List<DefectClassRule> staleRules = ClassRules.Where(rule => rule.IsStale).ToList();
+            if (staleRules.Count > 0)
+            {
+                foreach (DefectClassRule stale in staleRules)
+                {
+                    ClassRules.Remove(stale);
+                }
+                changed = true;
+            }
+
+            if (ClassRules.Count > 1)
+            {
+                List<string> before = ClassRules.Select(rule => rule.ClassName).ToList();
+                ClassRules.Sort((left, right) => ClassComparer.Compare(left.ClassName, right.ClassName));
+                if (!before.SequenceEqual(ClassRules.Select(rule => rule.ClassName), ClassComparer))
+                    {
+                        changed = true;
+                    }
+                }
+
+                return changed;
+            }
+
+            public DefectClassRule GetRule(string className)
+            {
+                if (string.IsNullOrWhiteSpace(className))
+                {
+                    return null;
+                }
+
+                return ClassRules.FirstOrDefault(rule => ClassComparer.Equals(rule.ClassName, className));
+            }
+        }
+
+        [DataContract]
+        private sealed class DefectClassRule
+        {
+            [DataMember(Order = 1)]
+            public string ClassName { get; set; } = string.Empty;
+
+            [DataMember(Order = 2)]
+            public bool Enabled { get; set; } = true;
+
+            [DataMember(Order = 3)]
+            public bool FailOnMatch { get; set; } = true;
+
+            [DataMember(Order = 4, EmitDefaultValue = false)]
+            public double? MinConfidence { get; set; }
+
+            [DataMember(Order = 5, EmitDefaultValue = false)]
+            public double? MaxConfidence { get; set; }
+
+            [DataMember(Order = 6, EmitDefaultValue = false)]
+            public double? MinArea { get; set; }
+
+            [DataMember(Order = 7, EmitDefaultValue = false)]
+            public double? MaxArea { get; set; }
+
+            [DataMember(Order = 8, EmitDefaultValue = false)]
+            public int? MinCount { get; set; }
+
+            [DataMember(Order = 9, EmitDefaultValue = false)]
+            public int? MaxCount { get; set; }
+
+            [DataMember(Order = 10)]
+            public bool IsStale { get; set; }
+
+            public static DefectClassRule Create(string className)
+            {
+                return new DefectClassRule
+                {
+                    ClassName = className?.Trim() ?? string.Empty,
+                    Enabled = true,
+                    FailOnMatch = true,
+                    IsStale = false
+                };
             }
         }
 
@@ -5906,8 +6231,70 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
         }
 
+        private sealed class IconButtonMetadata
+        {
+            public IconButtonMetadata(string glyph, string label, int minWidth, float fontSize, Padding? margin)
+            {
+                Glyph = glyph ?? string.Empty;
+                Label = label ?? string.Empty;
+                MinWidth = minWidth;
+                FontSize = fontSize;
+                CustomMargin = margin;
+            }
+
+            public string Glyph { get; }
+            public string Label { get; }
+            public int MinWidth { get; }
+            public float FontSize { get; }
+            public Padding? CustomMargin { get; }
+        }
+
+        private void ConfigureIconButton(Button button, string glyph, string tooltip, int minWidth = 40, float fontSize = 16f, Padding? customMargin = null)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            string label = button.Text;
+            IconButtonMetadata metadata = new IconButtonMetadata(glyph, label, minWidth, fontSize, customMargin);
+            button.Tag = metadata;
+            button.UseMnemonic = false;
+            button.AutoSize = false;
+            ApplyIconButtonLayout(button, metadata);
+
+            if (toolTip != null && !string.IsNullOrWhiteSpace(tooltip))
+            {
+                toolTip.SetToolTip(button, tooltip);
+            }
+        }
+
+        private void ApplyIconButtonLayout(Button button, IconButtonMetadata metadata)
+        {
+            if (button == null || metadata == null)
+            {
+                return;
+            }
+
+            button.Image = GetGlyphImage(metadata.Glyph, Color.White, metadata.FontSize);
+            button.Text = metadata.Label;
+            button.ImageAlign = ContentAlignment.MiddleLeft;
+            button.TextAlign = ContentAlignment.MiddleLeft;
+            button.TextImageRelation = TextImageRelation.ImageBeforeText;
+            button.Font = ScaleFont("Segoe UI Semibold", 9.5F);
+            button.Padding = new Padding(ScaleSize(10), 0, ScaleSize(12), 0);
+            button.Margin = metadata.CustomMargin ?? new Padding(ScaleSize(6), ScaleSize(4), ScaleSize(6), ScaleSize(4));
+            button.MinimumSize = new Size(ScaleSize(metadata.MinWidth), ScaleSize(36));
+            button.Height = ScaleSize(36);
+        }
+
         private void StylePrimaryButton(Button button, Color accent, Color hoverAccent)
         {
+            if (button == null)
+            {
+                return;
+            }
+
             button.FlatStyle = FlatStyle.Flat;
             button.FlatAppearance.BorderSize = 0;
             button.BackColor = accent;
@@ -5919,6 +6306,11 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             button.MouseEnter += (s, e) => button.BackColor = hoverAccent;
             button.MouseLeave += (s, e) => button.BackColor = accent;
+
+            if (button.Tag is IconButtonMetadata iconMeta)
+            {
+                ApplyIconButtonLayout(button, iconMeta);
+            }
         }
 
         private void StyleDangerButton(Button button, Color accent, Color hoverAccent)
@@ -6676,6 +7068,42 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             return result;
         }
 
+        private Image GetGlyphImage(string glyph, Color color, float fontSize)
+        {
+            if (string.IsNullOrWhiteSpace(glyph))
+            {
+                return null;
+            }
+
+            int iconSize = Math.Max(ScaleSize(16), (int)Math.Round(fontSize * CurrentDpiScale));
+            string cacheKey = $"{glyph}-{color.ToArgb()}-{iconSize}";
+            if (glyphImageCache.TryGetValue(cacheKey, out Image cached))
+            {
+                return cached;
+            }
+
+            Bitmap bitmap = new Bitmap(iconSize, iconSize);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Transparent);
+                graphics.TextRenderingHint = TextRenderingHint.AntiAlias;
+                using (Font font = new Font(IconFontFamily, fontSize, FontStyle.Regular, GraphicsUnit.Point))
+                using (Brush brush = new SolidBrush(color))
+                {
+                    RectangleF bounds = new RectangleF(0, 0, bitmap.Width, bitmap.Height);
+                    StringFormat format = new StringFormat
+                    {
+                        Alignment = StringAlignment.Center,
+                        LineAlignment = StringAlignment.Center
+                    };
+                    graphics.DrawString(glyph, font, brush, bounds, format);
+                }
+            }
+
+            glyphImageCache[cacheKey] = bitmap;
+            return bitmap;
+        }
+
         private string FormatGroupText(RuleGroupNode group)
         {
             string descriptor = group.Operator == LogicalOperatorType.And ? "ALL" : "ANY";
@@ -6757,6 +7185,11 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
         private void UpdateValueSuggestions(LogicField field, string preferredValue = null)
         {
+            if (CB_Value == null || CB_Value.IsDisposed)
+            {
+                return;
+            }
+
             bool previousSuppress = suppressLogicEvents;
             suppressLogicEvents = true;
 
@@ -6832,32 +7265,423 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             suggestions = suggestions.Take(25).ToList();
 
-            CB_Value.BeginUpdate();
-            CB_Value.Items.Clear();
-            AutoCompleteStringCollection autoSource = new AutoCompleteStringCollection();
-            foreach (string suggestion in suggestions)
+            bool beganUpdate = false;
+            try
             {
-                CB_Value.Items.Add(suggestion);
-                autoSource.Add(suggestion);
-            }
-            CB_Value.AutoCompleteCustomSource = autoSource;
+                if (CB_Value.IsHandleCreated)
+                {
+                    CB_Value.BeginUpdate();
+                    beganUpdate = true;
+                }
 
-            if (!string.IsNullOrWhiteSpace(preferredValue))
-            {
-                CB_Value.Text = preferredValue;
+                CB_Value.AutoCompleteMode = AutoCompleteMode.None;
+                CB_Value.AutoCompleteSource = AutoCompleteSource.None;
+                CB_Value.Items.Clear();
+
+                foreach (string suggestion in suggestions)
+                {
+                    CB_Value.Items.Add(suggestion);
+                }
+
+                if (!string.IsNullOrWhiteSpace(preferredValue))
+                {
+                    CB_Value.Text = preferredValue;
+                }
+                else if (suggestions.Count > 0)
+                {
+                    CB_Value.Text = suggestions[0];
+                }
+                else
+                {
+                    CB_Value.Text = string.Empty;
+                }
             }
-            else if (suggestions.Count > 0)
+            finally
             {
-                CB_Value.Text = suggestions[0];
-            }
-            else
-            {
-                CB_Value.Text = string.Empty;
+                if (beganUpdate && CB_Value.IsHandleCreated)
+                {
+                    CB_Value.EndUpdate();
+                }
+
+                suppressLogicEvents = previousSuppress;
             }
 
-            CB_Value.EndUpdate();
+        }
 
-            suppressLogicEvents = previousSuppress;
+        private void RefreshClassRuleCardsUI()
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new MethodInvoker(RefreshClassRuleCardsUI));
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                return;
+            }
+
+            if (flowClassRules == null || flowClassRules.IsDisposed)
+            {
+                return;
+            }
+
+            flowClassRules.SuspendLayout();
+            flowClassRules.Controls.Clear();
+            classRuleCards.Clear();
+
+            if (defectPolicy?.ClassRules != null)
+            {
+                IEnumerable<DefectClassRule> ordered = defectPolicy.ClassRules
+                    .OrderBy(rule => rule.IsStale)
+                    .ThenBy(rule => rule.ClassName, StringComparer.OrdinalIgnoreCase);
+
+                foreach (DefectClassRule rule in ordered)
+                {
+                    ClassRuleCard card = CreateClassRuleCard(rule);
+                    classRuleCards[rule.ClassName] = card;
+                    flowClassRules.Controls.Add(card.Container);
+                    ApplyRuleToCard(card);
+                }
+            }
+
+            flowClassRules.ResumeLayout(true);
+        }
+
+        private ClassRuleCard CreateClassRuleCard(DefectClassRule rule)
+        {
+            ClassRuleCard card = new ClassRuleCard(rule);
+
+            GroupBox container = new GroupBox
+            {
+                Text = string.IsNullOrWhiteSpace(rule.ClassName) ? "Unnamed Class" : rule.ClassName,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(ScaleSize(12), ScaleSize(24), ScaleSize(12), ScaleSize(12)),
+                Margin = new Padding(ScaleSize(8)),
+                MinimumSize = new Size(ScaleSize(420), ScaleSize(0)),
+                Font = ScaleFont("Segoe UI Semibold", 9.25F)
+            };
+            card.Container = container;
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                ColumnCount = 3,
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0)
+            };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
+            container.Controls.Add(layout);
+
+            card.EnableCheck = new CheckBox
+            {
+                Text = "Enable rule for this class",
+                AutoSize = true,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 0, ScaleSize(6)),
+                Font = ScaleFont("Segoe UI", 9F)
+            };
+            card.EnableCheck.CheckedChanged += OnClassRuleEnabledChanged;
+            card.EnableCheck.Tag = card;
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(card.EnableCheck, 0, 0);
+            layout.SetColumnSpan(card.EnableCheck, 3);
+
+            Label outcomeLabel = new Label
+            {
+                Text = "When detections meet these thresholds",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 0, ScaleSize(4), ScaleSize(6)),
+                Font = ScaleFont("Segoe UI", 9F, FontStyle.Regular)
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(outcomeLabel, 0, 1);
+
+            card.OutcomeCombo = new ComboBox
+            {
+                Dock = DockStyle.Fill,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Margin = new Padding(0, 0, ScaleSize(4), ScaleSize(6)),
+                Font = ScaleFont("Segoe UI", 9F)
+            };
+            card.OutcomeCombo.Items.Add(new ComboOption<bool>("Fail the inspection", true));
+            card.OutcomeCombo.Items.Add(new ComboOption<bool>("Pass only when thresholds remain satisfied", false));
+            card.OutcomeCombo.SelectedIndexChanged += OnClassRuleOutcomeChanged;
+            card.OutcomeCombo.Tag = card;
+            layout.Controls.Add(card.OutcomeCombo, 1, 1);
+            layout.SetColumnSpan(card.OutcomeCombo, 2);
+
+            int rowIndex = 2;
+
+            AddThresholdRow(card, layout, ref rowIndex, "Minimum confidence", "score", 3, 0m, 1m, 0.01m,
+                r => r.MinConfidence, (r, v) => r.MinConfidence = v);
+            AddThresholdRow(card, layout, ref rowIndex, "Maximum confidence", "score", 3, 0m, 1m, 0.01m,
+                r => r.MaxConfidence, (r, v) => r.MaxConfidence = v);
+            AddThresholdRow(card, layout, ref rowIndex, "Minimum area", "px^2", 0, 0m, 10000000m, 10m,
+                r => r.MinArea, (r, v) => r.MinArea = v);
+            AddThresholdRow(card, layout, ref rowIndex, "Maximum area", "px^2", 0, 0m, 10000000m, 10m,
+                r => r.MaxArea, (r, v) => r.MaxArea = v);
+            AddThresholdRow(card, layout, ref rowIndex, "Minimum detections", "count", 0, 0m, 10000m, 1m,
+                r => r.MinCount.HasValue ? (double?)r.MinCount.Value : null,
+                (r, v) => r.MinCount = v.HasValue ? (int?)Math.Round(v.Value) : null);
+            AddThresholdRow(card, layout, ref rowIndex, "Maximum detections", "count", 0, 0m, 10000m, 1m,
+                r => r.MaxCount.HasValue ? (double?)r.MaxCount.Value : null,
+                (r, v) => r.MaxCount = v.HasValue ? (int?)Math.Round(v.Value) : null);
+
+            card.StatusLabel = new Label
+            {
+                Text = "Class not present in the currently loaded project.",
+                ForeColor = Color.FromArgb(178, 34, 34),
+                Dock = DockStyle.Fill,
+                Visible = rule.IsStale,
+                Margin = new Padding(0, ScaleSize(4), 0, 0),
+                Font = ScaleFont("Segoe UI", 8.5F, FontStyle.Italic)
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            if (layout.RowCount <= rowIndex)
+            {
+                layout.RowCount = rowIndex + 1;
+            }
+            layout.Controls.Add(card.StatusLabel, 0, rowIndex);
+            layout.SetColumnSpan(card.StatusLabel, 3);
+            rowIndex++;
+            layout.RowCount = Math.Max(layout.RowCount, rowIndex);
+
+            return card;
+        }
+
+        private ThresholdPair AddThresholdRow(
+            ClassRuleCard card,
+            TableLayoutPanel layout,
+            ref int rowIndex,
+            string labelText,
+            string unitText,
+            int decimalPlaces,
+            decimal minimum,
+            decimal maximum,
+            decimal increment,
+            Func<DefectClassRule, double?> getter,
+            Action<DefectClassRule, double?> setter)
+        {
+            ThresholdPair pair = new ThresholdPair(card, labelText, getter, setter);
+
+            CheckBox toggle = new CheckBox
+            {
+                Text = labelText,
+                AutoSize = true,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, ScaleSize(4), ScaleSize(4)),
+                Font = ScaleFont("Segoe UI", 9F)
+            };
+            toggle.CheckedChanged += OnThresholdToggleChanged;
+            toggle.Tag = pair;
+            pair.Toggle = toggle;
+
+            NumericUpDown numeric = new NumericUpDown
+            {
+                DecimalPlaces = decimalPlaces,
+                Minimum = minimum,
+                Maximum = maximum,
+                Increment = increment,
+                Dock = DockStyle.Fill,
+                Enabled = false,
+                Margin = new Padding(0, 0, ScaleSize(4), ScaleSize(4)),
+                ThousandsSeparator = decimalPlaces == 0,
+                Font = ScaleFont("Segoe UI", 9F)
+            };
+            numeric.ValueChanged += OnThresholdValueChanged;
+            numeric.Tag = pair;
+            pair.Numeric = numeric;
+
+            Label unitLabel = new Label
+            {
+                Text = unitText,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = new Padding(0, 0, 0, ScaleSize(4)),
+                Font = ScaleFont("Segoe UI", 8.5F, FontStyle.Italic),
+                Enabled = false
+            };
+            pair.UnitLabel = unitLabel;
+
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            if (layout.RowCount <= rowIndex)
+            {
+                layout.RowCount = rowIndex + 1;
+            }
+
+            layout.Controls.Add(toggle, 0, rowIndex);
+            layout.Controls.Add(numeric, 1, rowIndex);
+            layout.Controls.Add(unitLabel, 2, rowIndex);
+            rowIndex++;
+            layout.RowCount = Math.Max(layout.RowCount, rowIndex);
+
+            card.Thresholds.Add(pair);
+            return pair;
+        }
+
+        private void ApplyRuleToCard(ClassRuleCard card)
+        {
+            if (card == null)
+            {
+                return;
+            }
+
+            card.Updating = true;
+
+            card.Container.Text = string.IsNullOrWhiteSpace(card.Rule.ClassName) ? "Unnamed Class" : card.Rule.ClassName;
+            card.EnableCheck.Checked = card.Rule.Enabled;
+            card.EnableCheck.Enabled = !card.Rule.IsStale;
+
+            bool interactable = card.Rule.Enabled && !card.Rule.IsStale;
+
+            int outcomeIndex = card.Rule.FailOnMatch ? 0 : 1;
+            if (card.OutcomeCombo.Items.Count > outcomeIndex)
+            {
+                card.OutcomeCombo.SelectedIndex = outcomeIndex;
+            }
+            card.OutcomeCombo.Enabled = interactable;
+
+            foreach (ThresholdPair pair in card.Thresholds)
+            {
+                double? value = pair.Getter(card.Rule);
+                bool toggleEnabled = !card.Rule.IsStale && card.Rule.Enabled;
+                pair.Toggle.Enabled = toggleEnabled;
+                pair.Toggle.Checked = value.HasValue;
+
+                bool numericEnabled = value.HasValue && interactable;
+                pair.Numeric.Enabled = numericEnabled;
+                pair.UnitLabel.Enabled = numericEnabled;
+
+                if (value.HasValue)
+                {
+                    pair.Numeric.Value = ClampToNumeric(pair.Numeric, value.Value);
+                }
+            }
+
+            if (card.StatusLabel != null)
+            {
+                card.StatusLabel.Visible = card.Rule.IsStale;
+            }
+
+            card.Updating = false;
+        }
+
+        private static decimal ClampToNumeric(NumericUpDown numeric, double value)
+        {
+            decimal dec;
+            try
+            {
+                dec = Convert.ToDecimal(value);
+            }
+            catch
+            {
+                dec = numeric.Minimum;
+            }
+
+            if (dec < numeric.Minimum)
+            {
+                dec = numeric.Minimum;
+            }
+            if (dec > numeric.Maximum)
+            {
+                dec = numeric.Maximum;
+            }
+
+            return dec;
+        }
+
+        private void OnClassRuleEnabledChanged(object sender, EventArgs e)
+        {
+            if (sender is CheckBox check && check.Tag is ClassRuleCard card)
+            {
+                if (card.Updating || card.Rule.IsStale)
+                {
+                    return;
+                }
+
+                card.Updating = true;
+                card.Rule.Enabled = check.Checked;
+                card.Updating = false;
+                ApplyRuleToCard(card);
+                SaveDefectPolicyToDisk();
+                outToLog($"[Policy] {(card.Rule.Enabled ? "Enabled" : "Disabled")} class rule '{card.Rule.ClassName}'.", LogStatus.Info);
+            }
+        }
+
+        private void OnClassRuleOutcomeChanged(object sender, EventArgs e)
+        {
+            if (sender is ComboBox combo && combo.Tag is ClassRuleCard card)
+            {
+                if (card.Updating || card.Rule.IsStale)
+                {
+                    return;
+                }
+
+                if (combo.SelectedItem is ComboOption<bool> option)
+                {
+                    card.Updating = true;
+                    card.Rule.FailOnMatch = option.Value;
+                    card.Updating = false;
+                    SaveDefectPolicyToDisk();
+                }
+            }
+        }
+
+        private void OnThresholdToggleChanged(object sender, EventArgs e)
+        {
+            if (sender is CheckBox toggle && toggle.Tag is ThresholdPair pair)
+            {
+                ClassRuleCard card = pair.Card;
+                if (card.Updating || card.Rule.IsStale)
+                {
+                    return;
+                }
+
+                card.Updating = true;
+                bool enabled = toggle.Checked && card.Rule.Enabled && !card.Rule.IsStale;
+                pair.Numeric.Enabled = enabled;
+                pair.UnitLabel.Enabled = enabled;
+                if (!card.Rule.Enabled && toggle.Checked)
+                {
+                    // revert to stored value if rule is disabled
+                    toggle.Checked = pair.Getter(card.Rule).HasValue;
+                }
+                else
+                {
+                    pair.Setter(card.Rule, enabled ? (double)pair.Numeric.Value : (double?)null);
+                }
+                card.Updating = false;
+                SaveDefectPolicyToDisk();
+            }
+        }
+
+        private void OnThresholdValueChanged(object sender, EventArgs e)
+        {
+            if (sender is NumericUpDown numeric && numeric.Tag is ThresholdPair pair)
+            {
+                ClassRuleCard card = pair.Card;
+                if (card.Updating || card.Rule.IsStale || !pair.Toggle.Checked || !card.Rule.Enabled)
+                {
+                    return;
+                }
+
+                card.Updating = true;
+                pair.Setter(card.Rule, (double)numeric.Value);
+                card.Updating = false;
+                SaveDefectPolicyToDisk();
+            }
         }
 
         private enum LogicField
@@ -6903,6 +7727,42 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             public LogicField Field { get; set; } = LogicField.ClassName;
             public LogicOperator Operator { get; set; } = LogicOperator.Equals;
             public string Value { get; set; } = string.Empty;
+        }
+
+        private sealed class ClassRuleCard
+        {
+            public ClassRuleCard(DefectClassRule rule)
+            {
+                Rule = rule ?? throw new ArgumentNullException(nameof(rule));
+                Thresholds = new List<ThresholdPair>();
+            }
+
+            public DefectClassRule Rule { get; }
+            public GroupBox Container { get; set; }
+            public CheckBox EnableCheck { get; set; }
+            public ComboBox OutcomeCombo { get; set; }
+            public Label StatusLabel { get; set; }
+            public List<ThresholdPair> Thresholds { get; }
+            public bool Updating { get; set; }
+        }
+
+        private sealed class ThresholdPair
+        {
+            public ThresholdPair(ClassRuleCard card, string name, Func<DefectClassRule, double?> getter, Action<DefectClassRule, double?> setter)
+            {
+                Card = card ?? throw new ArgumentNullException(nameof(card));
+                PropertyName = name ?? string.Empty;
+                Getter = getter ?? throw new ArgumentNullException(nameof(getter));
+                Setter = setter ?? throw new ArgumentNullException(nameof(setter));
+            }
+
+            public ClassRuleCard Card { get; }
+            public string PropertyName { get; }
+            public CheckBox Toggle { get; set; }
+            public NumericUpDown Numeric { get; set; }
+            public Label UnitLabel { get; set; }
+            public Func<DefectClassRule, double?> Getter { get; }
+            public Action<DefectClassRule, double?> Setter { get; }
         }
 
         private sealed class ModelContext : IDisposable
