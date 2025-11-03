@@ -39,12 +39,13 @@ namespace DemoApp
         private string loadedProjectPath = string.Empty;
         private RuleGroupNode logicRoot;
         private bool suppressLogicEvents;
-        private readonly Color statusPassBackground = Color.FromArgb(232, 245, 233);
-        private readonly Color statusPassForeground = Color.FromArgb(27, 94, 32);
-        private readonly Color statusFailBackground = Color.FromArgb(255, 235, 238);
+        private readonly Color statusPassBackground = Color.FromArgb(204, 232, 208);
+        private readonly Color statusPassForeground = Color.FromArgb(20, 80, 30);
+        private readonly Color statusFailBackground = Color.FromArgb(255, 210, 214);
         private readonly Color statusFailForeground = Color.FromArgb(178, 34, 34);
         private readonly Color statusNeutralBackground = Color.FromArgb(245, 247, 250);
         private readonly Color statusNeutralForeground = Color.FromArgb(94, 102, 112);
+        private const string StatusPassNoRulesMessage = "Result: PASS (no rules defined)";
         private TabControl leftTabs;
         private TabPage tabWorkflow;
         private TabPage tabLogicBuilder;
@@ -80,7 +81,6 @@ namespace DemoApp
         private ModelContext attachmentContext;
         private ModelContext defectContext;
 
-        private TabPage tabInitialize;
         private TableLayoutPanel initLayout;
         private GroupBox groupInitAttachment;
         private GroupBox groupInitDefect;
@@ -94,7 +94,6 @@ namespace DemoApp
         private Label LBL_InitDefectStatus;
         private Label LBL_InitSummary;
 
-        private GroupBox groupInitCameras;
         private Button BT_CameraRefresh;
         private ComboBox CB_TopCameraSelect;
         private ComboBox CB_FrontCameraSelect;
@@ -106,12 +105,31 @@ namespace DemoApp
         private Label LBL_FrontCameraStatus;
 
         private TurntableController turntableController;
-        private GroupBox groupInitTurntable;
         private ComboBox CB_TurntablePort;
         private Button BT_TurntableRefresh;
         private Button BT_TurntableConnect;
         private Button BT_TurntableHome;
         private Label LBL_TurntableStatus;
+        private Label LBL_StepModelsStatus;
+        private Label LBL_StepCamerasStatus;
+        private Label LBL_StepTurntableStatus;
+        private Button BT_InitBeginWorkflow;
+        private Button BT_OpenInitWizard;
+        private Label LBL_InitPrompt;
+        private Form activeInitDialog;
+        private Label LBL_InitSummaryModal;
+        private GroupBox groupWorkflowInit;
+        private bool initializationPromptShown;
+        private InitializationSettings initSettings;
+        private readonly string initSettingsPath;
+        private bool useRecordedRun;
+        private string recordedRunPath;
+        private CheckBox CHK_UseRecordedRun;
+        private TextBox TB_RecordedRunPath;
+        private Button BT_SelectRecordedRun;
+        private RunSession currentRunSession;
+        private bool isUpdatingRecordedRunUI;
+        private FlowLayoutPanel recordedRunPanel;
 
         private CameraContext topCameraContext;
         private CameraContext frontCameraContext;
@@ -119,16 +137,31 @@ namespace DemoApp
         private CancellationTokenSource captureSequenceCts;
         private bool showFrontOverlay = true;
         private int selectedFrontSequence = -1;
+        private bool responsiveLayoutInitialized;
+        private bool usingCompactLayout;
+        private const int CompactLayoutWidthThreshold = 1400;
+        private const float CompactLayoutDpiThreshold = 1.5f;
+        private float CurrentDpiScale => DeviceDpi / 96f;
 
         public DemoApp()
         {
             InitializeComponent();
+            StartPosition = FormStartPosition.CenterScreen;
+            WindowState = FormWindowState.Maximized;
+            initSettingsPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "SolVisionDemoApp",
+                "init-settings.ini");
+            initSettings = InitializationSettings.Load(initSettingsPath);
+            useRecordedRun = initSettings?.UseRecordedRun ?? false;
+            recordedRunPath = initSettings?.RecordedRunPath;
             classNameList = new List<string>();
             topCameraContext = new CameraContext(CameraRole.Top);
             frontCameraContext = new CameraContext(CameraRole.Front);
             turntableController = new TurntableController();
             turntableController.MessageReceived += TurntableController_MessageReceived;
             BuildLogicBuilderUI();
+            BuildWorkflowInitializationCard();
             groupStep3.Text = "Attachment Overview";
             groupStep6.Text = "Front Inspection";
             if (groupStep7 != null)
@@ -144,9 +177,40 @@ namespace DemoApp
                 groupDefectLedger.Text = "Defect Ledger";
             }
             InitializeLoadingIndicator();
+            InitializeResponsiveLayout();
             InitialSolVision();
+            LoadInitializationSettings();
             ApplyTheme();
             InitializeLogicBuilder();
+            Shown += DemoApp_Shown;
+        }
+
+        private Font ScaleFont(string family, float size, FontStyle style = FontStyle.Regular, GraphicsUnit unit = GraphicsUnit.Point)
+        {
+            float scaledSize = Math.Max(1f, size * CurrentDpiScale);
+            return new Font(family, scaledSize, style, unit);
+        }
+
+        private int ScaleSize(int value)
+        {
+            return Math.Max(1, (int)Math.Round(value * CurrentDpiScale));
+        }
+
+        private void DemoApp_Shown(object sender, EventArgs e)
+        {
+            if (initializationPromptShown)
+            {
+                return;
+            }
+
+            initializationPromptShown = true;
+            EnsureInitLayout();
+            UpdateInitSummary();
+
+            if (!IsInitializationComplete())
+            {
+                ShowInitializationWizard("Complete the initialization wizard before beginning the workflow.");
+            }
         }
 
 
@@ -244,6 +308,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
 
             PopulateTurntablePorts();
+            UpdateInitSummary();
         }
 
         private async void BT_LoadProject_Click(object sender, EventArgs e)
@@ -384,6 +449,18 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
 
             UpdateModelStatus(context, $"Loaded {fileName}", statusPassBackground, statusPassForeground);
+            if (initSettings != null)
+            {
+                if (context == attachmentContext)
+                {
+                    initSettings.AttachmentPath = filePath;
+                }
+                else if (context == defectContext)
+                {
+                    initSettings.DefectPath = filePath;
+                }
+                SaveInitializationSettings();
+            }
             outToLog($"[{context.Name}] Project loaded: {fileName}", LogStatus.Success);
 
             if (context == attachmentContext && updateWorkflowPath)
@@ -414,6 +491,11 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                     TB_InitAttachmentPath.Text = dlg.FileName;
                     ToggleInitButtons(attachmentContext, true);
                     UpdateModelStatus(attachmentContext, "Ready to load.", statusNeutralBackground, statusNeutralForeground);
+                    if (initSettings != null)
+                    {
+                        initSettings.AttachmentPath = dlg.FileName;
+                        SaveInitializationSettings();
+                    }
                 }
             }
         }
@@ -429,6 +511,11 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                     TB_InitDefectPath.Text = dlg.FileName;
                     ToggleInitButtons(defectContext, true);
                     UpdateModelStatus(defectContext, "Ready to load.", statusNeutralBackground, statusNeutralForeground);
+                    if (initSettings != null)
+                    {
+                        initSettings.DefectPath = dlg.FileName;
+                        SaveInitializationSettings();
+                    }
                 }
             }
         }
@@ -493,6 +580,146 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
         }
 
+        private void LoadInitializationSettings()
+        {
+            if (initSettings == null)
+            {
+                initSettings = new InitializationSettings();
+            }
+
+            EnsureInitLayout();
+
+            if (attachmentContext != null && !string.IsNullOrWhiteSpace(initSettings.AttachmentPath))
+            {
+                if (File.Exists(initSettings.AttachmentPath))
+                {
+                    TB_InitAttachmentPath.Text = initSettings.AttachmentPath;
+                    ToggleInitButtons(attachmentContext, true);
+                    UpdateModelStatus(attachmentContext, "Ready to load (remembered).", statusNeutralBackground, statusNeutralForeground);
+                }
+                else
+                {
+                    outToLog($"[Settings] Attachment project not found: {initSettings.AttachmentPath}", LogStatus.Warning);
+                }
+            }
+
+            if (defectContext != null && !string.IsNullOrWhiteSpace(initSettings.DefectPath))
+            {
+                if (File.Exists(initSettings.DefectPath))
+                {
+                    TB_InitDefectPath.Text = initSettings.DefectPath;
+                    ToggleInitButtons(defectContext, true);
+                    UpdateModelStatus(defectContext, "Ready to load (remembered).", statusNeutralBackground, statusNeutralForeground);
+                }
+                else
+                {
+                    outToLog($"[Settings] Defect project not found: {initSettings.DefectPath}", LogStatus.Warning);
+                }
+            }
+
+            PopulateTurntablePorts();
+            useRecordedRun = initSettings?.UseRecordedRun ?? false;
+            recordedRunPath = initSettings?.RecordedRunPath;
+            UpdateRecordedRunUiState();
+            UpdateInitSummary();
+            AdjustRecordedRunLayout();
+        }
+
+        private void SaveInitializationSettings()
+        {
+            if (initSettings == null)
+            {
+                initSettings = new InitializationSettings();
+            }
+
+            try
+            {
+                initSettings.Save(initSettingsPath);
+            }
+            catch (Exception ex)
+            {
+                outToLog($"[Settings] Failed to save initialization settings: {ex.Message}", LogStatus.Warning);
+            }
+        }
+
+        private bool IsRecordedRunSelectionValid(out string message)
+        {
+            message = string.Empty;
+            if (string.IsNullOrWhiteSpace(recordedRunPath))
+            {
+                message = "Select a saved run folder.";
+                return false;
+            }
+
+            if (!Directory.Exists(recordedRunPath))
+            {
+                message = "Saved run folder does not exist.";
+                return false;
+            }
+
+            if (!TryGetRecordedTopImagePath(recordedRunPath, out _))
+            {
+                message = "Saved run is missing a top image.";
+                return false;
+            }
+
+            string frontFolder = Path.Combine(recordedRunPath, "Front");
+            if (!Directory.Exists(frontFolder))
+            {
+                message = "Saved run is missing a Front folder.";
+                return false;
+            }
+
+            if (Directory.GetFiles(frontFolder, "*.png").Length == 0)
+            {
+                message = "Saved run has no front images.";
+                return false;
+            }
+
+            return true;
+        }
+
+        private void UpdateRecordedRunUiState()
+        {
+            bool valid = IsRecordedRunSelectionValid(out string validationMessage);
+            isUpdatingRecordedRunUI = true;
+            try
+            {
+                if (CHK_UseRecordedRun != null)
+                {
+                    CHK_UseRecordedRun.Checked = useRecordedRun;
+                }
+
+                if (TB_RecordedRunPath != null)
+                {
+                    TB_RecordedRunPath.Enabled = useRecordedRun;
+                    TB_RecordedRunPath.Text = recordedRunPath ?? string.Empty;
+                    if (useRecordedRun && !valid)
+                    {
+                        TB_RecordedRunPath.BackColor = Color.FromArgb(255, 235, 238);
+                        if (!string.IsNullOrEmpty(validationMessage))
+                        {
+                            toolTip?.SetToolTip(TB_RecordedRunPath, validationMessage);
+                        }
+                    }
+                    else
+                    {
+                        TB_RecordedRunPath.BackColor = Color.White;
+                        toolTip?.SetToolTip(TB_RecordedRunPath, null);
+                    }
+                }
+
+                if (BT_SelectRecordedRun != null)
+                {
+                    BT_SelectRecordedRun.Enabled = useRecordedRun;
+                }
+            }
+            finally
+            {
+                isUpdatingRecordedRunUI = false;
+            }
+        }
+
         private TableLayoutPanel CreateCameraRoleLayout(
             CameraContext context,
             string headerText,
@@ -506,31 +733,36 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             {
                 ColumnCount = 1,
                 Dock = DockStyle.Fill,
-                Margin = new Padding(6, 0, 6, 0),
-                RowCount = 5
+                Margin = new Padding(8, 0, 8, 0),
+                RowCount = 5,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
             };
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             Label header = new Label
             {
                 Text = headerText,
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+                Font = ScaleFont("Segoe UI", 9.5F, FontStyle.Bold),
                 Padding = new Padding(0, 4, 0, 4)
             };
             layout.Controls.Add(header, 0, 0);
 
             detailLabel = new Label
             {
-                Dock = DockStyle.Fill,
+                AutoSize = true,
+                Dock = DockStyle.Top,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Font = new Font("Segoe UI", 8.5F),
-                Padding = new Padding(0, 0, 0, 4)
+                Font = ScaleFont("Segoe UI", 8.5F),
+                Padding = new Padding(0, 0, 0, 4),
+                Margin = new Padding(0, 0, 0, ScaleSize(4)),
+                MaximumSize = new Size(0, ScaleSize(34))
             };
             layout.Controls.Add(detailLabel, 0, 1);
 
@@ -542,13 +774,16 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 DisplayMember = nameof(CameraDeviceInfo.DisplayName),
                 ValueMember = nameof(CameraDeviceInfo.SerialNumber)
             };
+            selector.Margin = new Padding(0, ScaleSize(4), 0, ScaleSize(4));
             layout.Controls.Add(selector, 0, 2);
 
             TableLayoutPanel buttonRow = new TableLayoutPanel
             {
                 ColumnCount = 2,
                 Dock = DockStyle.Fill,
-                Margin = new Padding(0)
+                Margin = new Padding(0, ScaleSize(4), 0, 0),
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
             };
             buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
             buttonRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
@@ -557,7 +792,8 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             {
                 Text = "Connect",
                 Dock = DockStyle.Fill,
-                Enabled = false
+                Enabled = false,
+                MinimumSize = new Size(ScaleSize(120), ScaleSize(32))
             };
             buttonRow.Controls.Add(connectButton, 0, 0);
 
@@ -565,7 +801,8 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             {
                 Text = "Capture Preview",
                 Dock = DockStyle.Fill,
-                Enabled = false
+                Enabled = false,
+                MinimumSize = new Size(ScaleSize(120), ScaleSize(32))
             };
             buttonRow.Controls.Add(captureButton, 1, 0);
 
@@ -573,9 +810,13 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             statusLabel = new Label
             {
-                Dock = DockStyle.Fill,
+                AutoSize = true,
+                Dock = DockStyle.Top,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(8, 6, 8, 6)
+                Padding = new Padding(ScaleSize(8), ScaleSize(4), ScaleSize(8), ScaleSize(4)),
+                Margin = new Padding(0, ScaleSize(4), 0, 0),
+                AutoEllipsis = true,
+                MaximumSize = new Size(0, ScaleSize(32))
             };
             layout.Controls.Add(statusLabel, 0, 4);
 
@@ -691,7 +932,23 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
             else
             {
-                context.Selector.SelectedIndex = cameraDeviceCache.Count > 0 ? 0 : -1;
+                bool appliedPreferred = false;
+                string preferredSerial = GetPreferredSerial(context.Role);
+                if (!string.IsNullOrWhiteSpace(preferredSerial))
+                {
+                    CameraDeviceInfo preferred = cameraDeviceCache.FirstOrDefault(d =>
+                        string.Equals(d.SerialNumber, preferredSerial, StringComparison.OrdinalIgnoreCase));
+                    if (preferred != null)
+                    {
+                        context.Selector.SelectedItem = preferred;
+                        appliedPreferred = true;
+                    }
+                }
+
+                if (!appliedPreferred)
+                {
+                    context.Selector.SelectedIndex = cameraDeviceCache.Count > 0 ? 0 : -1;
+                }
             }
 
             context.Selector.EndUpdate();
@@ -773,6 +1030,16 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             return ReferenceEquals(context, topCameraContext) ? frontCameraContext : topCameraContext;
         }
 
+        private string GetPreferredSerial(CameraRole role)
+        {
+            if (initSettings == null)
+            {
+                return null;
+            }
+
+            return role == CameraRole.Top ? initSettings.TopCameraSerial : initSettings.FrontCameraSerial;
+        }
+
         private void ToggleCameraConnection(CameraContext context)
         {
             if (context == null)
@@ -840,6 +1107,18 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 context.SetConnectedDevice(device, camera);
                 RefreshCameraUiState(context);
                 outToLog($"[Camera] {context.RoleName} connected to {device.DisplayName}.", LogStatus.Success);
+                if (initSettings != null && device != null)
+                {
+                    if (context.Role == CameraRole.Top)
+                    {
+                        initSettings.TopCameraSerial = device.SerialNumber;
+                    }
+                    else
+                    {
+                        initSettings.FrontCameraSerial = device.SerialNumber;
+                    }
+                    SaveInitializationSettings();
+                }
             }
             catch (Exception ex)
             {
@@ -960,15 +1239,15 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             Bitmap frame = null;
             try
             {
+                RunSession session = currentRunSession ?? StartNewRunSession();
                 frame = CaptureCameraFrame(topCameraContext, 2000);
                 if (frame == null)
                 {
                     throw new InvalidOperationException("Top camera returned an empty frame.");
                 }
 
-                string captureDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Captured");
-                Directory.CreateDirectory(captureDirectory);
-                string fileName = Path.Combine(captureDirectory, $"Top_{DateTime.Now:yyyyMMdd_HHmmssfff}.png");
+                Directory.CreateDirectory(session.TopFolder);
+                string fileName = session.TopImagePath;
 
                 Bitmap previewBitmap = (Bitmap)frame.Clone();
                 ReplacePictureBoxImage(PB_OriginalImage, previewBitmap);
@@ -995,6 +1274,65 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             {
                 frame?.Dispose();
             }
+        }
+
+        private DetectImg LoadRecordedRunTopImage()
+        {
+            if (!TryGetRecordedTopImagePath(recordedRunPath, out string sourcePath))
+            {
+                throw new InvalidOperationException("Recorded run top image could not be located.");
+            }
+
+            RunSession session = currentRunSession ?? StartNewRunSession();
+            Directory.CreateDirectory(session.TopFolder);
+            string destination = session.TopImagePath;
+
+            try
+            {
+                File.Copy(sourcePath, destination, true);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Unable to copy recorded top image: {ex.Message}");
+            }
+
+            using (Bitmap bitmap = (Bitmap)Image.FromFile(destination))
+            {
+                Bitmap previewBitmap = (Bitmap)bitmap.Clone();
+                ReplacePictureBoxImage(PB_OriginalImage, previewBitmap);
+                Mat mat = BitmapToMat(bitmap);
+
+                DetectImg detectImg = new DetectImg
+                {
+                    OriImg = mat,
+                    OriImgPath = destination,
+                    ObjList = new List<ObjectInfo>(),
+                    HasResults = false,
+                    AttachmentPoints = new List<AttachmentPointInfo>(),
+                    AttachmentCenter = new PointF(mat.Width / 2f, mat.Height / 2f),
+                    FrontInspections = new List<FrontInspectionResult>(),
+                    FrontInspectionComplete = false
+                };
+
+                outToLog($"[Recorded] Loaded top image from {sourcePath}.", LogStatus.Info);
+                return detectImg;
+            }
+        }
+
+        private RunSession StartNewRunSession()
+        {
+            string baseDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Runs");
+            Directory.CreateDirectory(baseDirectory);
+            string runFolder = Path.Combine(baseDirectory, $"Run_{DateTime.Now:yyyyMMdd_HHmmssfff}");
+            Directory.CreateDirectory(runFolder);
+            Directory.CreateDirectory(Path.Combine(runFolder, "Top"));
+            Directory.CreateDirectory(Path.Combine(runFolder, "Front"));
+            Directory.CreateDirectory(Path.Combine(runFolder, "Results"));
+
+            RunSession session = new RunSession(runFolder);
+            currentRunSession = session;
+            outToLog($"[Run] Created run directory: {runFolder}", LogStatus.Info);
+            return session;
         }
 
         private static Mat BitmapToMat(Bitmap bitmap)
@@ -1355,63 +1693,174 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             context.StatusDisplay.BackColor = background;
             context.StatusDisplay.ForeColor = foreground;
             context.StatusDisplay.Text = message;
+            UpdateInitSummary();
         }
 
         private void UpdateInitSummary()
         {
-            if (LBL_InitSummary == null)
-            {
-                return;
-            }
             bool attachmentLoaded = attachmentContext?.IsLoaded == true;
             bool defectLoaded = defectContext?.IsLoaded == true;
             string attachmentLabel = attachmentLoaded ? Path.GetFileName(attachmentContext.LoadedPath) : "Attachment not loaded";
             string defectLabel = defectLoaded ? Path.GetFileName(defectContext.LoadedPath) : "Defect not loaded";
             bool topConnected = topCameraContext?.IsConnected == true;
             bool frontConnected = frontCameraContext?.IsConnected == true;
-            string cameraLabel;
-            if (topConnected && frontConnected)
-            {
-                string topName = topCameraContext?.ConnectedDevice?.DisplayName ?? "Top camera";
-                string frontName = frontCameraContext?.ConnectedDevice?.DisplayName ?? "Front camera";
-                cameraLabel = $"Cameras ready ({topName}; {frontName})";
-            }
-            else if (!topConnected && !frontConnected)
-            {
-                cameraLabel = "Cameras disconnected";
-            }
-            else if (!topConnected)
-            {
-                cameraLabel = "Top camera disconnected";
-            }
-            else
-            {
-                cameraLabel = "Front camera disconnected";
-            }
             bool turntableConnected = turntableController?.IsConnected == true;
             bool turntableHomed = turntableController?.IsHomed == true;
             double? offset = turntableController?.LastOffsetAngle;
-            string turntableLabel;
-            if (!turntableConnected)
+            bool modelsReady = attachmentLoaded && defectLoaded;
+            bool camerasReady = topConnected && frontConnected;
+            bool turntableReady = turntableConnected && turntableHomed;
+            bool recordedReady = true;
+            string recordedMessage = string.Empty;
+            if (useRecordedRun)
             {
-                turntableLabel = "Turntable disconnected";
+                recordedReady = IsRecordedRunSelectionValid(out recordedMessage);
             }
-            else if (turntableHomed)
+
+            string cameraLabel;
+            string turntableLabel;
+            if (useRecordedRun)
             {
-                turntableLabel = offset.HasValue
-                    ? $"Turntable homed ({offset.Value:0.00} deg)"
-                    : "Turntable homed";
+                string runName = !string.IsNullOrWhiteSpace(recordedRunPath)
+                    ? new DirectoryInfo(recordedRunPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Name
+                    : "Recorded run";
+                if (recordedReady)
+                {
+                    cameraLabel = $"Recorded run ({runName})";
+                    turntableLabel = "Recorded run";
+                }
+                else
+                {
+                    cameraLabel = "Recorded run not ready";
+                    turntableLabel = cameraLabel;
+                }
             }
             else
             {
-                turntableLabel = "Turntable connected (not homed)";
+                if (topConnected && frontConnected)
+                {
+                    string topName = topCameraContext?.ConnectedDevice?.DisplayName ?? "Top camera";
+                    string frontName = frontCameraContext?.ConnectedDevice?.DisplayName ?? "Front camera";
+                    cameraLabel = $"Cameras ready ({topName}; {frontName})";
+                }
+                else if (!topConnected && !frontConnected)
+                {
+                    cameraLabel = "Cameras disconnected";
+                }
+                else if (!topConnected)
+                {
+                    cameraLabel = "Top camera disconnected";
+                }
+                else
+                {
+                    cameraLabel = "Front camera disconnected";
+                }
+
+                if (!turntableConnected)
+                {
+                    turntableLabel = "Turntable disconnected";
+                }
+                else if (turntableHomed)
+                {
+                    turntableLabel = offset.HasValue
+                        ? $"Turntable homed ({offset.Value:0.00} deg)"
+                        : "Turntable homed";
+                }
+                else
+                {
+                    turntableLabel = "Turntable connected (not homed)";
+                }
             }
-            bool ready = attachmentLoaded && defectLoaded && topConnected && frontConnected && turntableConnected && turntableHomed;
-            LBL_InitSummary.Text = ready
+
+            bool ready = modelsReady &&
+                (useRecordedRun ? recordedReady : (camerasReady && turntableReady));
+
+            if (LBL_StepModelsStatus != null)
+            {
+                if (!attachmentLoaded && !defectLoaded)
+                {
+                    SetStepStatus(LBL_StepModelsStatus, "Pending", statusNeutralBackground, statusNeutralForeground);
+                }
+                else if (modelsReady)
+                {
+                    SetStepStatus(LBL_StepModelsStatus, "Completed", statusPassBackground, statusPassForeground);
+                }
+                else
+                {
+                    SetStepStatus(LBL_StepModelsStatus, "Partial", statusFailBackground, statusFailForeground);
+                }
+            }
+
+            if (LBL_StepCamerasStatus != null)
+            {
+                if (useRecordedRun)
+                {
+                    string statusText = recordedReady ? "Recorded run" : "Recorded run (select folder)";
+                    SetStepStatus(LBL_StepCamerasStatus, statusText,
+                        recordedReady ? statusNeutralBackground : statusFailBackground,
+                        recordedReady ? statusNeutralForeground : statusFailForeground);
+                }
+                else if (!topConnected && !frontConnected)
+                {
+                    SetStepStatus(LBL_StepCamerasStatus, "Pending", statusNeutralBackground, statusNeutralForeground);
+                }
+                else if (camerasReady)
+                {
+                    SetStepStatus(LBL_StepCamerasStatus, "Ready", statusPassBackground, statusPassForeground);
+                }
+                else
+                {
+                    SetStepStatus(LBL_StepCamerasStatus, "Assign cameras", statusFailBackground, statusFailForeground);
+                }
+            }
+
+            if (LBL_StepTurntableStatus != null)
+            {
+                if (useRecordedRun)
+                {
+                    string statusText = recordedReady ? "Recorded run" : "Recorded run (select folder)";
+                    SetStepStatus(LBL_StepTurntableStatus, statusText,
+                        recordedReady ? statusNeutralBackground : statusFailBackground,
+                        recordedReady ? statusNeutralForeground : statusFailForeground);
+                }
+                else if (!turntableConnected)
+                {
+                    SetStepStatus(LBL_StepTurntableStatus, "Disconnected", statusFailBackground, statusFailForeground);
+                }
+                else if (turntableHomed)
+                {
+                    SetStepStatus(LBL_StepTurntableStatus, "Ready", statusPassBackground, statusPassForeground);
+                }
+                else
+                {
+                    SetStepStatus(LBL_StepTurntableStatus, "Needs homing", statusFailBackground, statusFailForeground);
+                }
+            }
+
+            string summaryText = ready
                 ? $"Ready: {attachmentLabel} | {defectLabel} | {cameraLabel} | {turntableLabel}"
                 : $"Attachment: {attachmentLabel} | Defect: {defectLabel} | {cameraLabel} | {turntableLabel}";
-            LBL_InitSummary.BackColor = ready ? statusPassBackground : statusNeutralBackground;
-            LBL_InitSummary.ForeColor = ready ? statusPassForeground : statusNeutralForeground;
+            Color summaryBack = ready ? statusPassBackground : statusNeutralBackground;
+            Color summaryFore = ready ? statusPassForeground : statusNeutralForeground;
+
+            if (LBL_InitSummary != null && !LBL_InitSummary.IsDisposed)
+            {
+                LBL_InitSummary.Text = summaryText;
+                LBL_InitSummary.BackColor = summaryBack;
+                LBL_InitSummary.ForeColor = summaryFore;
+            }
+
+            if (LBL_InitSummaryModal != null && !LBL_InitSummaryModal.IsDisposed)
+            {
+                LBL_InitSummaryModal.Text = summaryText;
+                LBL_InitSummaryModal.BackColor = summaryBack;
+                LBL_InitSummaryModal.ForeColor = summaryFore;
+            }
+
+            if (BT_InitBeginWorkflow != null && !BT_InitBeginWorkflow.IsDisposed)
+            {
+                BT_InitBeginWorkflow.Enabled = ready;
+            }
         }
 
             private void PopulateTurntablePorts()
@@ -1476,6 +1925,13 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
                 CB_TurntablePort.SelectedItem = turntableController.PortName;
 
+            }
+            else if (!string.IsNullOrWhiteSpace(initSettings?.TurntablePort) &&
+                     ports.Contains(initSettings.TurntablePort, StringComparer.OrdinalIgnoreCase))
+            {
+                string savedPort = ports.First(p =>
+                    string.Equals(p, initSettings.TurntablePort, StringComparison.OrdinalIgnoreCase));
+                CB_TurntablePort.SelectedItem = savedPort;
             }
 
             else if (ports.Length > 0)
@@ -1573,6 +2029,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
 
             UpdateStatusLabel(LBL_TurntableStatus, background, foreground, message);
+            UpdateInitSummary();
 
         }
 
@@ -1715,6 +2172,11 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 UpdateTurntableConnectionUI(true, port);
 
                 outToLog($"[Turntable] Connected to {port}.", LogStatus.Success);
+                if (initSettings != null)
+                {
+                    initSettings.TurntablePort = port;
+                    SaveInitializationSettings();
+                }
 
             }
 
@@ -1749,15 +2211,10 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
         {
 
             if (turntableController == null || !turntableController.IsConnected)
-
             {
-
                 MessageBox.Show(this, "Connect to the turntable before homing.", "Turntable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-
-                FocusInitializeTab();
-
+                FocusInitializeTab("Connect to the turntable before homing.");
                 return;
-
             }
 
             BT_TurntableHome.Enabled = false;
@@ -1814,7 +2271,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
                         outToLog($"[Turntable] Homing failed: {result.Message}", LogStatus.Error);
 
-                        FocusInitializeTab();
+                        FocusInitializeTab($"Resolve turntable homing issue: {result.Message}");
 
                     }
 
@@ -1830,7 +2287,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
                 outToLog("[Turntable] Homing timed out.", LogStatus.Error);
 
-                FocusInitializeTab();
+                FocusInitializeTab("Turntable homing timed out.");
 
             }
 
@@ -1842,7 +2299,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
                 outToLog($"[Turntable] Homing error: {ex.Message}", LogStatus.Error);
 
-                FocusInitializeTab();
+                FocusInitializeTab($"Turntable homing error: {ex.Message}");
 
             }
 
@@ -1868,18 +2325,9 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
 
 
-        private void FocusInitializeTab()
-
+        private void FocusInitializeTab(string reason = null)
         {
-
-            if (leftTabs != null && tabInitialize != null && leftTabs.TabPages.Contains(tabInitialize))
-
-            {
-
-                leftTabs.SelectedTab = tabInitialize;
-
-            }
-
+            ShowInitializationWizard(reason);
         }
 
 
@@ -1940,10 +2388,22 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             CancelAttachmentSequence();
 
+            RunSession session = StartNewRunSession();
+            if (useRecordedRun && session != null)
+            {
+                session.RecordedSourcePath = recordedRunPath;
+                if (!string.IsNullOrWhiteSpace(recordedRunPath))
+                {
+                    outToLog($"[Run] Using recorded dataset: {recordedRunPath}", LogStatus.Info);
+                }
+            }
+
             DetectImg capturedImage;
             try
             {
-                capturedImage = CaptureTopCameraImageForDetection();
+                capturedImage = useRecordedRun
+                    ? LoadRecordedRunTopImage()
+                    : CaptureTopCameraImageForDetection();
             }
             catch (Exception ex)
             {
@@ -1977,49 +2437,62 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             if (attachmentContext?.IsLoaded != true)
             {
                 outToLog("Please load the attachment project before running detection.", LogStatus.Warning);
-                FocusInitializeTab();
+                FocusInitializeTab("Load the attachment project before running detection.");
                 return false;
             }
 
             if (defectContext?.IsLoaded != true)
             {
                 outToLog("Please load the defect project before running detection.", LogStatus.Warning);
-                FocusInitializeTab();
+                FocusInitializeTab("Load the defect project before running detection.");
                 return false;
             }
 
-            if (topCameraContext?.IsConnected != true)
+            if (useRecordedRun)
             {
-                outToLog("Connect the top camera before running detection.", LogStatus.Warning);
-                FocusInitializeTab();
-                return false;
+                if (!IsRecordedRunSelectionValid(out string recordedMessage))
+                {
+                    string reason = $"Select a saved run before running detection ({recordedMessage}).";
+                    outToLog($"Recorded run not ready: {recordedMessage}", LogStatus.Warning);
+                    FocusInitializeTab(reason);
+                    return false;
+                }
             }
-
-            if (frontCameraContext?.IsConnected != true)
+            else
             {
-                outToLog("Connect the front camera before running detection.", LogStatus.Warning);
-                FocusInitializeTab();
-                return false;
-            }
+                if (topCameraContext?.IsConnected != true)
+                {
+                    outToLog("Connect the top camera before running detection.", LogStatus.Warning);
+                    FocusInitializeTab("Connect the top camera before running detection.");
+                    return false;
+                }
 
-            if (turntableController?.IsConnected != true)
-            {
-                outToLog("Connect to the turntable before running detection.", LogStatus.Warning);
-                FocusInitializeTab();
-                return false;
-            }
+                if (frontCameraContext?.IsConnected != true)
+                {
+                    outToLog("Connect the front camera before running detection.", LogStatus.Warning);
+                    FocusInitializeTab("Connect the front camera before running detection.");
+                    return false;
+                }
 
-            if (!turntableController.IsHomed)
-            {
-                outToLog("Home the turntable before running detection.", LogStatus.Warning);
-                FocusInitializeTab();
-                return false;
+                if (turntableController?.IsConnected != true)
+                {
+                    outToLog("Connect to the turntable before running detection.", LogStatus.Warning);
+                    FocusInitializeTab("Connect to the turntable before running detection.");
+                    return false;
+                }
+
+                if (!turntableController.IsHomed)
+                {
+                    outToLog("Home the turntable before running detection.", LogStatus.Warning);
+                    FocusInitializeTab("Home the turntable before running detection.");
+                    return false;
+                }
             }
 
             if (string.IsNullOrWhiteSpace(loadedProjectPath))
             {
                 outToLog("Attachment project path is missing.", LogStatus.Warning);
-                FocusInitializeTab();
+                FocusInitializeTab("Attachment project path is missing.");
                 return false;
             }
 
@@ -2350,11 +2823,17 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             RefreshFrontGallery();
             UpdateFrontPreviewAndLedger();
 
-            if (turntableController == null || !turntableController.IsConnected)
+            if (useRecordedRun)
             {
-                outToLog("[Sequence] Turntable not connected; skipping rotation capture.", LogStatus.Warning);
+                StartRecordedRunProcessing(image);
                 return;
             }
+
+        if (turntableController == null || !turntableController.IsConnected)
+        {
+            outToLog("[Sequence] Turntable not connected; skipping rotation capture.", LogStatus.Warning);
+            return;
+        }
 
             if (!turntableController.IsHomed)
             {
@@ -2418,6 +2897,150 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                     }
                 }
             });
+        }
+
+        private void StartRecordedRunProcessing(DetectImg image)
+        {
+            if (image == null)
+            {
+                return;
+            }
+
+            if (!IsRecordedRunSelectionValid(out string validationMessage))
+            {
+                outToLog($"[Sequence] Recorded run unavailable: {validationMessage}", LogStatus.Warning);
+                image.FrontInspectionComplete = true;
+                UpdateFrontPreviewAndLedger();
+                return;
+            }
+
+            if (image.AttachmentPoints == null || image.AttachmentPoints.Count == 0)
+            {
+                image.FrontInspectionComplete = true;
+                UpdateFrontPreviewAndLedger();
+                return;
+            }
+
+            RunSession session = currentRunSession ?? StartNewRunSession();
+            List<AttachmentPointInfo> snapshot = image.AttachmentPoints.ToList();
+            List<FrontCaptureTicket> tickets = CreateRecordedRunTickets(snapshot);
+            if (tickets.Count == 0)
+            {
+                outToLog("[Sequence] No recorded front images matched the attachment points.", LogStatus.Warning);
+                image.FrontInspectionComplete = true;
+                UpdateFrontPreviewAndLedger();
+                return;
+            }
+
+            var cts = new CancellationTokenSource();
+            CancellationTokenSource previous = Interlocked.Exchange(ref captureSequenceCts, cts);
+            if (previous != null)
+            {
+                previous.Cancel();
+                previous.Dispose();
+            }
+
+            outToLog($"[Sequence] Processing recorded run images from {recordedRunPath}.", LogStatus.Progress);
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    List<FrontInspectionResult> inspections = await ProcessFrontCapturesAsync(tickets, cts.Token).ConfigureAwait(false);
+                    if (!IsDisposed)
+                    {
+                        BeginInvoke(new MethodInvoker(() =>
+                        {
+                            ApplyFrontInspectionResults(image, inspections);
+                            outToLog("[Sequence] Recorded run processing completed.", LogStatus.Success);
+                        }));
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    if (!IsDisposed)
+                    {
+                        BeginInvoke(new MethodInvoker(() =>
+                        {
+                            outToLog("[Sequence] Recorded run processing cancelled.", LogStatus.Warning);
+                        }));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (!IsDisposed)
+                    {
+                        BeginInvoke(new MethodInvoker(() =>
+                        {
+                            outToLog($"[Sequence] Recorded run processing failed: {ex.Message}", LogStatus.Error);
+                        }));
+                    }
+                }
+                finally
+                {
+                    if (Interlocked.CompareExchange(ref captureSequenceCts, null, cts) == cts)
+                    {
+                        cts.Dispose();
+                    }
+                }
+            });
+        }
+
+        private List<FrontCaptureTicket> CreateRecordedRunTickets(List<AttachmentPointInfo> points)
+        {
+            List<FrontCaptureTicket> tickets = new List<FrontCaptureTicket>();
+            if (points == null || points.Count == 0)
+            {
+                return tickets;
+            }
+
+            if (string.IsNullOrWhiteSpace(recordedRunPath) || !Directory.Exists(recordedRunPath))
+            {
+                return tickets;
+            }
+
+            RunSession session = currentRunSession ?? StartNewRunSession();
+            string sourceFrontFolder = Path.Combine(recordedRunPath, "Front");
+            if (!Directory.Exists(sourceFrontFolder))
+            {
+                return tickets;
+            }
+
+            foreach (AttachmentPointInfo point in points)
+            {
+                string searchPattern = $"Front_Index{point.Sequence:00}*.png";
+                string sourcePath = Directory.GetFiles(sourceFrontFolder, searchPattern)
+                    .OrderBy(File.GetLastWriteTimeUtc)
+                    .FirstOrDefault();
+                if (string.IsNullOrEmpty(sourcePath))
+                {
+                    outToLog($"[Sequence] Recorded run missing image for index {point.Sequence}.", LogStatus.Warning);
+                    continue;
+                }
+
+                double angle = TryParseAngleFromFileName(sourcePath, out double parsed) ? parsed : 0.0;
+                string fileName = Path.GetFileName(sourcePath);
+                if (string.IsNullOrEmpty(fileName))
+                {
+                    fileName = $"Front_Index{point.Sequence:00}.png";
+                }
+
+                Directory.CreateDirectory(session.FrontFolder);
+                string destinationPath = Path.Combine(session.FrontFolder, fileName);
+                try
+                {
+                    File.Copy(sourcePath, destinationPath, true);
+                }
+                catch (Exception ex)
+                {
+                    outToLog($"[Sequence] Failed to copy recorded image '{sourcePath}': {ex.Message}", LogStatus.Warning);
+                    continue;
+                }
+
+                tickets.Add(new FrontCaptureTicket(point.Sequence, destinationPath, angle, File.GetLastWriteTime(sourcePath)));
+            }
+
+            return tickets;
         }
 
         private async Task RunAttachmentSequenceAsync(DetectImg sourceImage, List<AttachmentPointInfo> points, CancellationToken token)
@@ -2612,23 +3235,9 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
         private string EnsureFrontCaptureDirectory(DetectImg sourceImage)
         {
-            string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
-            if (sourceImage != null && !string.IsNullOrWhiteSpace(sourceImage.OriImgPath))
-            {
-                string candidate = Path.GetDirectoryName(sourceImage.OriImgPath);
-                if (!string.IsNullOrEmpty(candidate))
-                {
-                    baseDirectory = candidate;
-                }
-            }
-
-            string folderName = sourceImage != null && !string.IsNullOrWhiteSpace(sourceImage.OriImgPath)
-                ? Path.GetFileNameWithoutExtension(sourceImage.OriImgPath) + "_Front"
-                : "FrontCaptures";
-
-            string directory = Path.Combine(baseDirectory, folderName);
-            Directory.CreateDirectory(directory);
-            return directory;
+            RunSession session = currentRunSession ?? StartNewRunSession();
+            Directory.CreateDirectory(session.FrontFolder);
+            return session.FrontFolder;
         }
 
         private static string BuildAngleToken(double angle)
@@ -2636,6 +3245,78 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             string formatted = angle.ToString("+000.0;-000.0;+000.0", CultureInfo.InvariantCulture);
             formatted = formatted.Replace("+", "P").Replace("-", "N").Replace(".", "_");
             return $"Angle_{formatted}";
+        }
+
+        private bool TryGetRecordedTopImagePath(string runPath, out string topImagePath)
+        {
+            topImagePath = null;
+            if (string.IsNullOrWhiteSpace(runPath) || !Directory.Exists(runPath))
+            {
+                return false;
+            }
+
+            string candidate = Path.Combine(runPath, "Top.png");
+            if (File.Exists(candidate))
+            {
+                topImagePath = candidate;
+                return true;
+            }
+
+            string topFolder = Path.Combine(runPath, "Top");
+            if (Directory.Exists(topFolder))
+            {
+                string[] files = Directory.GetFiles(topFolder, "*.png");
+                if (files.Length > 0)
+                {
+                    topImagePath = files.OrderBy(File.GetLastWriteTimeUtc).Last();
+                    return true;
+                }
+            }
+
+            string[] fallback = Directory.GetFiles(runPath, "Top*.png");
+            if (fallback.Length > 0)
+            {
+                topImagePath = fallback.OrderBy(File.GetLastWriteTimeUtc).Last();
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryParseAngleFromFileName(string path, out double angle)
+        {
+            angle = 0;
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return false;
+            }
+
+            string fileName = Path.GetFileNameWithoutExtension(path);
+            if (string.IsNullOrEmpty(fileName))
+            {
+                return false;
+            }
+
+            int idx = fileName.IndexOf("Angle_", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+            {
+                return false;
+            }
+
+            string token = fileName.Substring(idx + "Angle_".Length);
+            if (string.IsNullOrEmpty(token))
+            {
+                return false;
+            }
+
+            token = token.Replace('P', '+').Replace('N', '-').Replace('_', '.');
+            if (double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed))
+            {
+                angle = parsed;
+                return true;
+            }
+
+            return false;
         }
 
         private async Task<List<FrontInspectionResult>> ProcessFrontCapturesAsync(List<FrontCaptureTicket> captures, CancellationToken token)
@@ -2819,6 +3500,10 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
 
             sourceImage.FrontInspections.AddRange(inspections);
+            if (currentRunSession != null)
+            {
+                WriteDefectSummaryCsv(sourceImage.FrontInspections);
+            }
             UpdateDefectClassNamesFromInspections(sourceImage.FrontInspections);
 
             if (sourceImage.AttachmentPoints != null)
@@ -2835,6 +3520,48 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             RefreshFrontGallery();
             UpdateFrontPreviewAndLedger();
             UpdateLogicEvaluation();
+        }
+
+        private void WriteDefectSummaryCsv(IEnumerable<FrontInspectionResult> inspections)
+        {
+            if (currentRunSession == null || inspections == null)
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(currentRunSession.ResultsFolder);
+                string csvPath = Path.Combine(currentRunSession.ResultsFolder, "DefectSummary.csv");
+                using (StreamWriter writer = new StreamWriter(csvPath, false, Encoding.UTF8))
+                {
+                    writer.WriteLine("Sequence,AngleDegrees,DefectClass,Confidence,Area,Bounds");
+                    foreach (FrontInspectionResult result in inspections.OrderBy(r => r.Sequence))
+                    {
+                        if (result.Detections != null && result.Detections.Count > 0)
+                        {
+                            foreach (ObjectInfo detection in result.Detections)
+                            {
+                                Rectangle rect = detection.DisplayRec;
+                                float score = detection.confidence != 0 ? detection.confidence : detection.classifyScore;
+                                double area = Math.Max(0, rect.Width) * Math.Max(0, rect.Height);
+                                string bounds = $"{rect.Left},{rect.Top},{rect.Width},{rect.Height}";
+                                string className = string.IsNullOrWhiteSpace(detection?.name) ? "(unknown)" : detection.name.Trim();
+                                writer.WriteLine($"{result.Sequence},{result.AngleDegrees:F2},{className},{score:F4},{area:F0},\"{bounds}\"");
+                            }
+                        }
+                        else
+                        {
+                            writer.WriteLine($"{result.Sequence},{result.AngleDegrees:F2},PASS,,,"); 
+                        }
+                    }
+                }
+                outToLog($"[Results] Saved defect summary to {Path.Combine(currentRunSession.ResultsFolder, "DefectSummary.csv")}.", LogStatus.Success);
+            }
+            catch (Exception ex)
+            {
+                outToLog($"[Results] Failed to write defect summary: {ex.Message}", LogStatus.Warning);
+            }
         }
 
         private void DetermineInitialFrontSelection(DetectImg image)
@@ -2891,7 +3618,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 Tag = result.Sequence,
                 Width = 190,
                 Height = 90,
-                Margin = new Padding(6),
+                Margin = new Padding(8),
                 TextAlign = ContentAlignment.MiddleLeft,
                 ImageAlign = ContentAlignment.MiddleRight,
                 FlatStyle = FlatStyle.Flat,
@@ -3288,7 +4015,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
         private void ApplyTheme()
         {
-            Font baseFont = new Font("Segoe UI", 9F);
+            Font baseFont = ScaleFont("Segoe UI", 9F);
             this.Font = baseFont;
 
             Color background = Color.FromArgb(246, 248, 252);
@@ -3314,6 +4041,10 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             StyleGroupSurface(groupStep6, surface, border);
             StyleGroupSurface(groupDefectLedger, surface, border);
             StyleGroupSurface(groupLogic, surface, border);
+            if (groupWorkflowInit != null)
+            {
+                StyleGroupSurface(groupWorkflowInit, surface, border);
+            }
             if (groupInitAttachment != null)
             {
                 StyleGroupSurface(groupInitAttachment, surface, border);
@@ -3322,17 +4053,13 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             {
                 StyleGroupSurface(groupInitDefect, surface, border);
             }
-            if (groupInitTurntable != null)
-            {
-                StyleGroupSurface(groupInitTurntable, surface, border);
-            }
 
             if (leftTabs != null)
             {
-                leftTabs.Font = new Font("Segoe UI Semibold", 9F);
+                leftTabs.Font = ScaleFont("Segoe UI Semibold", 9F);
                 leftTabs.Appearance = TabAppearance.Normal;
                 leftTabs.DrawMode = TabDrawMode.Normal;
-                leftTabs.ItemSize = new Size(120, 28);
+                leftTabs.ItemSize = new Size(ScaleSize(120), ScaleSize(28));
                 leftTabs.SizeMode = TabSizeMode.Fixed;
                 foreach (TabPage tab in leftTabs.TabPages)
                 {
@@ -3349,14 +4076,32 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             BT_FrontPrev.Height = 28;
             BT_FrontNext.Height = 28;
 
-            foreach (Button initButton in new[] { BT_InitAttachmentBrowse, BT_InitAttachmentLoad, BT_InitDefectBrowse, BT_InitDefectLoad, BT_TurntableRefresh, BT_TurntableConnect, BT_TurntableHome })
+            foreach (Button initButton in new[] { BT_InitAttachmentBrowse, BT_InitAttachmentLoad, BT_InitDefectBrowse, BT_InitDefectLoad, BT_CameraRefresh, BT_TopCameraConnect, BT_TopCameraCapture, BT_FrontCameraConnect, BT_FrontCameraCapture, BT_TurntableRefresh, BT_TurntableConnect, BT_TurntableHome, BT_InitBeginWorkflow, BT_OpenInitWizard })
             {
                 if (initButton != null)
                 {
                     StylePrimaryButton(initButton, accentPrimary, accentHover);
-                    initButton.Height = 32;
-                    initButton.Margin = new Padding(4);
+                    if (initButton == BT_TurntableHome)
+                    {
+                        initButton.AutoSize = true;
+                        initButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                        initButton.MinimumSize = new Size(0, 0);
+                        initButton.Margin = new Padding(ScaleSize(12), ScaleSize(4), 0, ScaleSize(4));
+                    }
+                    else
+                    {
+                        initButton.AutoSize = false;
+                        initButton.Height = ScaleSize(28);
+                        initButton.Margin = new Padding(ScaleSize(4));
+                        initButton.MinimumSize = new Size(ScaleSize(120), ScaleSize(26));
+                    }
                 }
+            }
+
+            if (BT_CameraRefresh != null)
+            {
+                BT_CameraRefresh.MinimumSize = new Size(ScaleSize(110), ScaleSize(30));
+                BT_CameraRefresh.Height = ScaleSize(32);
             }
 
             foreach (TextBox initPath in new[] { TB_InitAttachmentPath, TB_InitDefectPath })
@@ -3376,8 +4121,8 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             RTB_Info.BorderStyle = BorderStyle.None;
             RTB_Info.BackColor = Color.FromArgb(249, 250, 253);
             RTB_Info.ForeColor = accentSecondary;
-            RTB_Info.Font = new Font("Consolas", 9F);
-            RTB_Info.Margin = new Padding(16);
+            RTB_Info.Font = ScaleFont("Consolas", 9F);
+            RTB_Info.Margin = new Padding(ScaleSize(16));
             flowFrontGallery.BackColor = surface;
 
             ConfigureDataGridView(DG_Detections, surface, border, accentPrimary, accentSecondary);
@@ -3395,7 +4140,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             TV_Logic.BackColor = Color.FromArgb(249, 250, 253);
             TV_Logic.ForeColor = accentSecondary;
             TV_Logic.BorderStyle = BorderStyle.None;
-            TV_Logic.Font = new Font("Segoe UI", 9F);
+            TV_Logic.Font = ScaleFont("Segoe UI", 9F);
             TV_Logic.LineColor = Color.FromArgb(210, 216, 226);
 
             foreach (ComboBox combo in new[] { CB_GroupOperator, CB_Field, CB_Operator, CB_Value, CB_TurntablePort })
@@ -3403,7 +4148,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 combo.FlatStyle = FlatStyle.Flat;
                 combo.BackColor = Color.FromArgb(252, 253, 255);
                 combo.ForeColor = accentSecondary;
-                combo.Margin = new Padding(0, 4, 0, 4);
+                combo.Margin = new Padding(0, ScaleSize(4), 0, ScaleSize(4));
             }
 
             CB_Value.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
@@ -3412,375 +4157,95 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             StylePrimaryButton(BT_AddRule, accentPrimary, accentHover);
             StylePrimaryButton(BT_AddGroup, accentPrimary, accentHover);
-            BT_AddRule.Height = 28;
-            BT_AddGroup.Height = 28;
-            BT_AddRule.Margin = new Padding(2, 0, 2, 0);
-            BT_AddGroup.Margin = new Padding(2, 0, 2, 0);
+            BT_AddRule.Height = ScaleSize(28);
+            BT_AddGroup.Height = ScaleSize(28);
+            BT_AddRule.Margin = new Padding(ScaleSize(2), 0, ScaleSize(2), 0);
+            BT_AddGroup.Margin = new Padding(ScaleSize(2), 0, ScaleSize(2), 0);
 
             StylePrimaryButton(BT_LogicHelp, accentSecondary, Color.FromArgb(76, 84, 94));
             BT_LogicHelp.BackColor = Color.FromArgb(231, 233, 238);
             BT_LogicHelp.ForeColor = Color.FromArgb(58, 66, 78);
-            BT_LogicHelp.Width = 28;
-            BT_LogicHelp.Height = 28;
+            BT_LogicHelp.Width = ScaleSize(28);
+            BT_LogicHelp.Height = ScaleSize(28);
 
             StyleDangerButton(BT_RemoveNode, Color.FromArgb(224, 68, 67), Color.FromArgb(205, 58, 57));
-            BT_RemoveNode.Height = 28;
-            BT_RemoveNode.Margin = new Padding(2, 0, 2, 0);
+            BT_RemoveNode.Height = ScaleSize(28);
+            BT_RemoveNode.Margin = new Padding(ScaleSize(2), 0, ScaleSize(2), 0);
 
             StyleStatusLabel(LBL_ResultStatus);
             StyleStatusLabel(LBL_WorkflowStatus);
             StyleStatusLabel(LBL_InitSummary);
             StyleStatusLabel(LBL_TurntableStatus);
+            if (LBL_ResultStatus != null)
+            {
+                LBL_ResultStatus.Margin = new Padding(0);
+                LBL_ResultStatus.AutoSize = true;
+                LBL_ResultStatus.Dock = DockStyle.Top;
+            }
+            if (LBL_WorkflowStatus != null)
+            {
+                LBL_WorkflowStatus.Margin = new Padding(0);
+                LBL_WorkflowStatus.AutoSize = true;
+                LBL_WorkflowStatus.Dock = DockStyle.Top;
+            }
             SetLogicStatusNeutral("Awaiting defect inspection.");
 
-            this.Padding = new Padding(12);
+            this.Padding = new Padding(ScaleSize(12));
         }
 
         private void BuildLogicBuilderUI()
         {
             toolTip = new ToolTip();
 
-            leftTabs = new TabControl
+            EnsureInitLayout();
+
+            if (leftTabs == null || leftTabs.IsDisposed)
             {
-                Dock = DockStyle.Fill,
-                Appearance = TabAppearance.Normal,
-                SizeMode = TabSizeMode.Fixed,
-                ItemSize = new Size(120, 28)
-            };
+                leftTabs = new TabControl
+                {
+                    Name = "leftTabs"
+                };
+            }
 
-            tabInitialize = new TabPage("Initialize")
+            leftTabs.Dock = DockStyle.Fill;
+            leftTabs.Appearance = TabAppearance.Normal;
+            leftTabs.SizeMode = TabSizeMode.Fixed;
+            leftTabs.ItemSize = new Size(ScaleSize(120), ScaleSize(28));
+            leftTabs.Margin = new Padding(0, 0, ScaleSize(6), 0);
+            leftTabs.Multiline = true;
+
+            if (!tableLayoutPanelMain.Controls.Contains(leftTabs))
             {
-                Padding = new Padding(10)
-            };
-            tabWorkflow = new TabPage("Workflow")
+                tableLayoutPanelMain.Controls.Add(leftTabs, 0, 0);
+                tableLayoutPanelMain.SetColumn(leftTabs, 0);
+                tableLayoutPanelMain.SetRow(leftTabs, 0);
+            }
+
+            if (tabWorkflow == null || tabWorkflow.IsDisposed)
             {
-                Padding = new Padding(8)
-            };
-            tabLogicBuilder = new TabPage("Logic Builder")
+                tabWorkflow = new TabPage("Workflow");
+            }
+            tabWorkflow.Text = "Workflow";
+            tabWorkflow.Padding = new Padding(ScaleSize(8));
+            tabWorkflow.Controls.Clear();
+
+            if (panelStepsHost != null && panelStepsHost.Parent != null && panelStepsHost.Parent != tabWorkflow)
             {
-                Padding = new Padding(10)
-            };
+                panelStepsHost.Parent.Controls.Remove(panelStepsHost);
+            }
+            if (panelStepsHost != null)
+            {
+                panelStepsHost.Dock = DockStyle.Fill;
+            }
 
-initLayout = new TableLayoutPanel
-{
-    Dock = DockStyle.Fill,
-    ColumnCount = 1,
-    RowCount = 5
-};
-initLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
-initLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
-initLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
-initLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
-initLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72F));
+            if (tabLogicBuilder == null || tabLogicBuilder.IsDisposed)
+            {
+                tabLogicBuilder = new TabPage("Logic Builder");
+            }
+            tabLogicBuilder.Text = "Logic Builder";
+            tabLogicBuilder.Padding = new Padding(ScaleSize(12));
+            tabLogicBuilder.Controls.Clear();
 
-groupInitAttachment = new GroupBox
-{
-    Text = "Attachment Model",
-    Dock = DockStyle.Fill,
-    Padding = new Padding(12, 20, 12, 12)
-};
-
-TableLayoutPanel attachmentLayout = new TableLayoutPanel
-{
-    ColumnCount = 3,
-    Dock = DockStyle.Fill,
-    Margin = new Padding(0)
-};
-attachmentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-attachmentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
-attachmentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
-attachmentLayout.RowCount = 3;
-attachmentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-attachmentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-attachmentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-
-TB_InitAttachmentPath = new TextBox
-{
-    Dock = DockStyle.Fill,
-    ReadOnly = true,
-    Margin = new Padding(0, 0, 0, 8)
-};
-attachmentLayout.Controls.Add(TB_InitAttachmentPath, 0, 0);
-attachmentLayout.SetColumnSpan(TB_InitAttachmentPath, 3);
-
-BT_InitAttachmentBrowse = new Button
-{
-    Text = "Browse...",
-    Dock = DockStyle.Fill
-};
-BT_InitAttachmentBrowse.Click += BT_InitAttachmentBrowse_Click;
-attachmentLayout.Controls.Add(BT_InitAttachmentBrowse, 1, 1);
-
-BT_InitAttachmentLoad = new Button
-{
-    Text = "Load",
-    Dock = DockStyle.Fill,
-    Enabled = false
-};
-BT_InitAttachmentLoad.Click += BT_InitAttachmentLoad_Click;
-attachmentLayout.Controls.Add(BT_InitAttachmentLoad, 2, 1);
-
-LBL_InitAttachmentStatus = new Label
-{
-    Text = "Not loaded.",
-    Dock = DockStyle.Fill,
-    TextAlign = ContentAlignment.MiddleLeft,
-    Padding = new Padding(8, 6, 8, 6)
-};
-attachmentLayout.Controls.Add(LBL_InitAttachmentStatus, 0, 2);
-attachmentLayout.SetColumnSpan(LBL_InitAttachmentStatus, 3);
-
-groupInitAttachment.Controls.Add(attachmentLayout);
-
-groupInitDefect = new GroupBox
-{
-    Text = "Defect Model",
-    Dock = DockStyle.Fill,
-    Padding = new Padding(12, 20, 12, 12)
-};
-
-TableLayoutPanel defectLayout = new TableLayoutPanel
-{
-    ColumnCount = 3,
-    Dock = DockStyle.Fill,
-    Margin = new Padding(0)
-};
-defectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-defectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
-defectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
-defectLayout.RowCount = 3;
-defectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-defectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-defectLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-
-TB_InitDefectPath = new TextBox
-{
-    Dock = DockStyle.Fill,
-    ReadOnly = true,
-    Margin = new Padding(0, 0, 0, 8)
-};
-defectLayout.Controls.Add(TB_InitDefectPath, 0, 0);
-defectLayout.SetColumnSpan(TB_InitDefectPath, 3);
-
-BT_InitDefectBrowse = new Button
-{
-    Text = "Browse...",
-    Dock = DockStyle.Fill
-};
-BT_InitDefectBrowse.Click += BT_InitDefectBrowse_Click;
-defectLayout.Controls.Add(BT_InitDefectBrowse, 1, 1);
-
-BT_InitDefectLoad = new Button
-{
-    Text = "Load",
-    Dock = DockStyle.Fill,
-    Enabled = false
-};
-BT_InitDefectLoad.Click += BT_InitDefectLoad_Click;
-defectLayout.Controls.Add(BT_InitDefectLoad, 2, 1);
-
-LBL_InitDefectStatus = new Label
-{
-    Text = "Not loaded.",
-    Dock = DockStyle.Fill,
-    TextAlign = ContentAlignment.MiddleLeft,
-    Padding = new Padding(8, 6, 8, 6)
-};
-defectLayout.Controls.Add(LBL_InitDefectStatus, 0, 2);
-defectLayout.SetColumnSpan(LBL_InitDefectStatus, 3);
-
-groupInitDefect.Controls.Add(defectLayout);
-
-groupInitCameras = new GroupBox
-{
-    Text = "Cameras",
-    Dock = DockStyle.Fill,
-    Padding = new Padding(12, 20, 12, 12)
-};
-
-TableLayoutPanel camerasLayout = new TableLayoutPanel
-{
-    ColumnCount = 1,
-    Dock = DockStyle.Fill,
-    Margin = new Padding(0),
-    RowCount = 2
-};
-camerasLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
-camerasLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-
-FlowLayoutPanel camerasToolbar = new FlowLayoutPanel
-{
-    Dock = DockStyle.Fill,
-    FlowDirection = FlowDirection.LeftToRight,
-    WrapContents = false,
-    Margin = new Padding(0),
-    Padding = new Padding(0)
-};
-
-BT_CameraRefresh = new Button
-{
-    Text = "Refresh",
-    AutoSize = true
-};
-BT_CameraRefresh.Click += BT_CameraRefresh_Click;
-camerasToolbar.Controls.Add(BT_CameraRefresh);
-
-Label cameraToolbarHint = new Label
-{
-    AutoSize = true,
-    Margin = new Padding(12, 8, 0, 0),
-    Text = "Pick the top and front cameras, then use Capture Preview to refresh the panels on the right."
-};
-camerasToolbar.Controls.Add(cameraToolbarHint);
-
-camerasLayout.Controls.Add(camerasToolbar, 0, 0);
-
-TableLayoutPanel cameraColumns = new TableLayoutPanel
-{
-    ColumnCount = 2,
-    Dock = DockStyle.Fill,
-    Margin = new Padding(0)
-};
-cameraColumns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-cameraColumns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-
-Label LBL_TopCameraDetail;
-TableLayoutPanel topCameraLayout = CreateCameraRoleLayout(
-    topCameraContext,
-    "Top Camera",
-    out CB_TopCameraSelect,
-    out BT_TopCameraConnect,
-    out BT_TopCameraCapture,
-    out LBL_TopCameraDetail,
-    out LBL_TopCameraStatus);
-
-Label LBL_FrontCameraDetail;
-TableLayoutPanel frontCameraLayout = CreateCameraRoleLayout(
-    frontCameraContext,
-    "Front Camera",
-    out CB_FrontCameraSelect,
-    out BT_FrontCameraConnect,
-    out BT_FrontCameraCapture,
-    out LBL_FrontCameraDetail,
-    out LBL_FrontCameraStatus);
-
-cameraColumns.Controls.Add(topCameraLayout, 0, 0);
-cameraColumns.Controls.Add(frontCameraLayout, 1, 0);
-
-camerasLayout.Controls.Add(cameraColumns, 0, 1);
-groupInitCameras.Controls.Add(camerasLayout);
-
-topCameraContext.Selector = CB_TopCameraSelect;
-topCameraContext.ConnectButton = BT_TopCameraConnect;
-topCameraContext.CaptureButton = BT_TopCameraCapture;
-topCameraContext.StatusLabel = LBL_TopCameraStatus;
-topCameraContext.DetailLabel = LBL_TopCameraDetail;
-
-frontCameraContext.Selector = CB_FrontCameraSelect;
-frontCameraContext.ConnectButton = BT_FrontCameraConnect;
-frontCameraContext.CaptureButton = BT_FrontCameraCapture;
-frontCameraContext.StatusLabel = LBL_FrontCameraStatus;
-frontCameraContext.DetailLabel = LBL_FrontCameraDetail;
-
-CB_TopCameraSelect.SelectedIndexChanged += (s, e) => UpdateCameraSelectionChanged(topCameraContext);
-CB_FrontCameraSelect.SelectedIndexChanged += (s, e) => UpdateCameraSelectionChanged(frontCameraContext);
-BT_TopCameraConnect.Click += (s, e) => ToggleCameraConnection(topCameraContext);
-BT_FrontCameraConnect.Click += (s, e) => ToggleCameraConnection(frontCameraContext);
-BT_TopCameraCapture.Click += (s, e) => CaptureCameraPreview(topCameraContext);
-BT_FrontCameraCapture.Click += (s, e) => CaptureCameraPreview(frontCameraContext);
-
-RefreshCameraUiState(topCameraContext);
-RefreshCameraUiState(frontCameraContext);
-RefreshCameraList();
-
-groupInitTurntable = new GroupBox
-{
-    Text = "Turntable",
-    Dock = DockStyle.Fill,
-    Padding = new Padding(12, 20, 12, 12)
-};
-
-TableLayoutPanel turntableLayout = new TableLayoutPanel
-{
-    ColumnCount = 3,
-    Dock = DockStyle.Fill,
-    Margin = new Padding(0)
-};
-turntableLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-turntableLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
-turntableLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
-turntableLayout.RowCount = 3;
-turntableLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-turntableLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-turntableLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-
-CB_TurntablePort = new ComboBox
-{
-    Dock = DockStyle.Fill,
-    DropDownStyle = ComboBoxStyle.DropDownList
-};
-turntableLayout.Controls.Add(CB_TurntablePort, 0, 0);
-
-BT_TurntableRefresh = new Button
-{
-    Text = "Refresh",
-    Dock = DockStyle.Fill
-};
-BT_TurntableRefresh.Click += BT_TurntableRefresh_Click;
-turntableLayout.Controls.Add(BT_TurntableRefresh, 1, 0);
-
-BT_TurntableConnect = new Button
-{
-    Text = "Connect",
-    Dock = DockStyle.Fill
-};
-BT_TurntableConnect.Click += BT_TurntableConnect_Click;
-turntableLayout.Controls.Add(BT_TurntableConnect, 2, 0);
-
-Panel turntableSpacer = new Panel { Dock = DockStyle.Fill };
-turntableLayout.Controls.Add(turntableSpacer, 0, 1);
-turntableLayout.SetColumnSpan(turntableSpacer, 2);
-
-BT_TurntableHome = new Button
-{
-    Text = "Home",
-    Dock = DockStyle.Fill,
-    Enabled = false
-};
-BT_TurntableHome.Click += BT_TurntableHome_Click;
-turntableLayout.Controls.Add(BT_TurntableHome, 2, 1);
-
-LBL_TurntableStatus = new Label
-{
-    Text = "Disconnected.",
-    Dock = DockStyle.Fill,
-    TextAlign = ContentAlignment.MiddleLeft,
-    Padding = new Padding(8, 6, 8, 6)
-};
-turntableLayout.Controls.Add(LBL_TurntableStatus, 0, 2);
-turntableLayout.SetColumnSpan(LBL_TurntableStatus, 3);
-
-groupInitTurntable.Controls.Add(turntableLayout);
-
-LBL_InitSummary = new Label
-{
-    Dock = DockStyle.Fill,
-    TextAlign = ContentAlignment.MiddleLeft,
-    Padding = new Padding(12, 10, 12, 10),
-    Margin = new Padding(0, 12, 0, 0)
-};
-
-initLayout.Controls.Add(groupInitAttachment, 0, 0);
-initLayout.Controls.Add(groupInitDefect, 0, 1);
-initLayout.Controls.Add(groupInitCameras, 0, 2);
-initLayout.Controls.Add(groupInitTurntable, 0, 3);
-initLayout.Controls.Add(LBL_InitSummary, 0, 4);
-
-tabInitialize.Controls.Add(initLayout);
-
-
-            tableLayoutPanelMain.Controls.Remove(tableLayoutSteps);
-            tableLayoutSteps.Dock = DockStyle.Fill;
             workflowLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -3788,27 +4253,50 @@ tabInitialize.Controls.Add(initLayout);
                 ColumnCount = 1
             };
             workflowLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            workflowLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48F));
+            workflowLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             workflowLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
 
             LBL_WorkflowStatus = new Label
             {
-                Dock = DockStyle.Fill,
+                AutoSize = true,
                 Text = "Awaiting project.",
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(16, 12, 16, 12),
-                Margin = new Padding(0, 8, 0, 0)
+                Dock = DockStyle.Top
             };
 
-            workflowLayout.Controls.Add(tableLayoutSteps, 0, 0);
-            workflowLayout.Controls.Add(LBL_WorkflowStatus, 0, 1);
+            Panel workflowFooter = new Panel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(ScaleSize(16), ScaleSize(8), ScaleSize(16), ScaleSize(8))
+            };
+            workflowFooter.Controls.Add(LBL_WorkflowStatus);
+
+            Control workflowBody = panelStepsHost ?? tableLayoutSteps;
+            if (workflowBody != null && workflowBody.Parent != null && workflowBody.Parent != workflowLayout)
+            {
+                workflowBody.Parent.Controls.Remove(workflowBody);
+            }
+            if (workflowBody == tableLayoutSteps)
+            {
+                tableLayoutSteps.Dock = DockStyle.Top;
+            }
+            workflowLayout.Controls.Add(workflowBody, 0, 0);
+            workflowLayout.Controls.Add(workflowFooter, 0, 1);
             tabWorkflow.Controls.Add(workflowLayout);
+
+            if (panelStepsHost != null)
+            {
+                Size preferredSize = tableLayoutSteps?.PreferredSize ?? Size.Empty;
+                panelStepsHost.AutoScrollMinSize = new Size(0, preferredSize.Height + ScaleSize(40));
+            }
 
             groupLogic = new GroupBox
             {
                 Text = "Logic Rules",
                 Dock = DockStyle.Fill,
-                Padding = new Padding(12, 24, 12, 12)
+                Padding = new Padding(ScaleSize(12), ScaleSize(24), ScaleSize(12), ScaleSize(12))
             };
 
             tableLayoutLogic = new TableLayoutPanel
@@ -3845,10 +4333,10 @@ tabInitialize.Controls.Add(initLayout);
             tableLayoutLogicEditor.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38F));
             tableLayoutLogicEditor.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62F));
             tableLayoutLogicEditor.RowCount = 6;
-            tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
-            tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
-            tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
-            tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
+            tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleSize(32)));
+            tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleSize(32)));
+            tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleSize(32)));
+            tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleSize(32)));
             tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             tableLayoutLogicEditor.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
@@ -3967,7 +4455,7 @@ tabInitialize.Controls.Add(initLayout);
                 Text = "Awaiting defect inspection.",
                 TextAlign = ContentAlignment.MiddleLeft,
                 BorderStyle = BorderStyle.None,
-                Margin = new Padding(3, 0, 3, 0)
+                Margin = new Padding(4, 0, 4, 0)
             };
 
             tableLayoutLogic.Controls.Add(TV_Logic, 0, 0);
@@ -4023,13 +4511,1111 @@ tabInitialize.Controls.Add(initLayout);
 
             tabLogicBuilder.Controls.Add(logicRootLayout);
 
-            leftTabs.TabPages.Add(tabInitialize);
-            leftTabs.TabPages.Add(tabWorkflow);
-            leftTabs.TabPages.Add(tabLogicBuilder);
+            if (leftTabs.TabPages.Contains(tabWorkflow))
+            {
+                leftTabs.TabPages.Remove(tabWorkflow);
+            }
+            if (leftTabs.TabPages.Contains(tabLogicBuilder))
+            {
+                leftTabs.TabPages.Remove(tabLogicBuilder);
+            }
 
-            tableLayoutPanelMain.Controls.Add(leftTabs, 0, 0);
-            tableLayoutPanelMain.SetColumn(leftTabs, 0);
-            tableLayoutPanelMain.SetRow(leftTabs, 0);
+            leftTabs.TabPages.Insert(0, tabWorkflow);
+            leftTabs.TabPages.Add(tabLogicBuilder);
+        }
+
+        private TableLayoutPanel BuildInitializationLayout()
+        {
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.FromArgb(246, 248, 252),
+                Padding = new Padding(8, 8, 8, 12),
+                Margin = new Padding(0)
+            };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+
+            int row = 0;
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(BuildInitializationHeader(), 0, row++);
+
+            Control modelBody = BuildModelStepBody();
+            Panel modelsCard = CreateStepCard("Step 1 - Load Models", "Select the Attachment and Defect TSP projects used for this workstation.", modelBody, out LBL_StepModelsStatus);
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(modelsCard, 0, row++);
+
+            Control cameraBody = BuildCameraStepBody();
+            Panel camerasCard = CreateStepCard("Step 2 - Configure Cameras", "Assign top and front cameras, then capture a preview to confirm connectivity.", cameraBody, out LBL_StepCamerasStatus);
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(camerasCard, 0, row++);
+
+            Control turntableBody = BuildTurntableStepBody();
+            Panel turntableCard = CreateStepCard("Step 3 - Prepare Turntable", "Connect to the turntable controller and perform homing to establish zero.", turntableBody, out LBL_StepTurntableStatus);
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(turntableCard, 0, row++);
+
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(BuildSummarySection(), 0, row++);
+
+            return layout;
+        }
+
+        private void BuildWorkflowInitializationCard()
+        {
+            if (tableLayoutSteps == null)
+            {
+                return;
+            }
+
+            groupWorkflowInit = new GroupBox
+            {
+                Text = "Initialize System",
+                Dock = DockStyle.Fill,
+                Padding = new Padding(12, 12, 12, 12),
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                MinimumSize = new Size(0, ScaleSize(140))
+            };
+
+            TableLayoutPanel inner = new TableLayoutPanel
+            {
+                ColumnCount = 2,
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0)
+            };
+            inner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            inner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            inner.RowCount = 3;
+            inner.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            inner.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            inner.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            LBL_InitSummary = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                Padding = new Padding(0, 4, 12, 4),
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(94, 102, 112),
+                MaximumSize = new Size(0, 0)
+            };
+
+            if (BT_OpenInitWizard == null || BT_OpenInitWizard.IsDisposed)
+            {
+                BT_OpenInitWizard = new Button();
+            }
+            BT_OpenInitWizard.Text = "Open Wizard";
+            BT_OpenInitWizard.AutoSize = true;
+            BT_OpenInitWizard.Margin = new Padding(0);
+            BT_OpenInitWizard.Anchor = AnchorStyles.Right;
+            BT_OpenInitWizard.MinimumSize = new Size(ScaleSize(110), ScaleSize(32));
+            BT_OpenInitWizard.Height = ScaleSize(32);
+            BT_OpenInitWizard.Click -= BT_OpenInitWizard_Click;
+            BT_OpenInitWizard.Click += BT_OpenInitWizard_Click;
+
+            inner.Controls.Add(LBL_InitSummary, 0, 0);
+            inner.Controls.Add(BT_OpenInitWizard, 1, 0);
+
+            if (CHK_UseRecordedRun == null || CHK_UseRecordedRun.IsDisposed)
+            {
+                CHK_UseRecordedRun = new CheckBox();
+            }
+            CHK_UseRecordedRun.AutoSize = true;
+            CHK_UseRecordedRun.Text = "Use saved run images";
+            CHK_UseRecordedRun.Margin = new Padding(0, ScaleSize(4), ScaleSize(8), 0);
+            CHK_UseRecordedRun.CheckedChanged -= CHK_UseRecordedRun_CheckedChanged;
+            CHK_UseRecordedRun.CheckedChanged += CHK_UseRecordedRun_CheckedChanged;
+
+            if (TB_RecordedRunPath == null || TB_RecordedRunPath.IsDisposed)
+            {
+                TB_RecordedRunPath = new TextBox();
+            }
+            TB_RecordedRunPath.ReadOnly = true;
+            TB_RecordedRunPath.Margin = new Padding(0, ScaleSize(2), ScaleSize(8), 0);
+            TB_RecordedRunPath.MinimumSize = new Size(ScaleSize(220), ScaleSize(28));
+            TB_RecordedRunPath.Height = ScaleSize(28);
+            TB_RecordedRunPath.Dock = DockStyle.Fill;
+
+            if (BT_SelectRecordedRun == null || BT_SelectRecordedRun.IsDisposed)
+            {
+                BT_SelectRecordedRun = new Button();
+            }
+            BT_SelectRecordedRun.AutoSize = true;
+            BT_SelectRecordedRun.Text = "Browse...";
+            BT_SelectRecordedRun.Margin = new Padding(0, 0, 0, 0);
+            BT_SelectRecordedRun.MinimumSize = new Size(ScaleSize(90), ScaleSize(28));
+            BT_SelectRecordedRun.Height = ScaleSize(28);
+            BT_SelectRecordedRun.Click -= BT_SelectRecordedRun_Click;
+            BT_SelectRecordedRun.Click += BT_SelectRecordedRun_Click;
+
+            recordedRunPanel = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0, ScaleSize(6), 0, 0),
+                Padding = new Padding(0),
+                Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top
+            };
+            CHK_UseRecordedRun.Margin = new Padding(0, ScaleSize(2), ScaleSize(12), 0);
+            TB_RecordedRunPath.Margin = new Padding(0, 0, ScaleSize(8), 0);
+            BT_SelectRecordedRun.Margin = new Padding(0);
+
+            recordedRunPanel.Controls.Add(CHK_UseRecordedRun);
+            recordedRunPanel.Controls.Add(TB_RecordedRunPath);
+            recordedRunPanel.Controls.Add(BT_SelectRecordedRun);
+
+            inner.Controls.Add(recordedRunPanel, 0, 1);
+            inner.SetColumnSpan(recordedRunPanel, 2);
+
+            recordedRunPanel.SizeChanged += (s, e) => AdjustRecordedRunLayout();
+            inner.SizeChanged += (s, e) => AdjustRecordedRunLayout();
+
+            groupWorkflowInit.Controls.Add(inner);
+
+            tableLayoutSteps.SuspendLayout();
+
+            // Rebuild layout order with initialization group inserted before step 4
+            tableLayoutSteps.Controls.Clear();
+            tableLayoutSteps.RowStyles.Clear();
+            tableLayoutSteps.RowCount = 7;
+            tableLayoutSteps.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tableLayoutSteps.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tableLayoutSteps.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tableLayoutSteps.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tableLayoutSteps.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            tableLayoutSteps.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            tableLayoutSteps.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            tableLayoutSteps.Controls.Add(groupStep1, 0, 0);
+            tableLayoutSteps.Controls.Add(groupStep2, 0, 1);
+            tableLayoutSteps.Controls.Add(groupWorkflowInit, 0, 2);
+            tableLayoutSteps.Controls.Add(groupStep4, 0, 3);
+            tableLayoutSteps.Controls.Add(groupGallery, 0, 4);
+            tableLayoutSteps.Controls.Add(groupStep5, 0, 5);
+            tableLayoutSteps.Controls.Add(groupStep7, 0, 6);
+
+            tableLayoutSteps.ResumeLayout();
+
+            ApplyResponsiveLayout(force: true);
+            UpdateInitSummary();
+            AdjustRecordedRunLayout();
+        }
+
+        private Control BuildInitializationHeader()
+        {
+            FlowLayoutPanel headerFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Padding = new Padding(ScaleSize(8), 0, ScaleSize(8), ScaleSize(12)),
+                Margin = new Padding(0, 0, 0, ScaleSize(12))
+            };
+
+            Label title = new Label
+            {
+                AutoSize = true,
+                Text = "System Initialization",
+                Font = ScaleFont("Segoe UI Semibold", 16F),
+                ForeColor = Color.FromArgb(47, 57, 72),
+                Margin = new Padding(0, 0, 0, ScaleSize(4))
+            };
+
+            Label subtitle = new Label
+            {
+                AutoSize = true,
+                Text = "Complete the following steps to prepare models, cameras, and the turntable before running inspections.",
+                Font = ScaleFont("Segoe UI", 9.5F),
+                ForeColor = Color.FromArgb(94, 102, 112),
+                Margin = new Padding(0, 0, 0, 0),
+                MaximumSize = new Size(900, 0)
+            };
+
+            LBL_InitPrompt = new Label
+            {
+                AutoSize = true,
+                Visible = false,
+                ForeColor = Color.FromArgb(178, 34, 34),
+                Font = ScaleFont("Segoe UI", 9F, FontStyle.Italic),
+                Margin = new Padding(0, ScaleSize(8), 0, 0),
+                MaximumSize = new Size(900, 0)
+            };
+
+            headerFlow.Controls.Add(title);
+            headerFlow.Controls.Add(subtitle);
+            headerFlow.Controls.Add(LBL_InitPrompt);
+
+            return headerFlow;
+        }
+
+        private Panel CreateStepCard(string title, string description, Control body, out Label statusChip)
+        {
+            statusChip = CreateStatusChip("Pending", statusNeutralBackground, statusNeutralForeground);
+            StyleStepStatusChip(statusChip);
+
+            Label titleLabel = new Label
+            {
+                AutoSize = true,
+                Text = title,
+                Font = ScaleFont("Segoe UI Semibold", 11F),
+                ForeColor = Color.FromArgb(47, 57, 72),
+                Margin = new Padding(0, 0, 0, 2)
+            };
+
+            Label descriptionLabel = new Label
+            {
+                AutoSize = true,
+                Text = description,
+                Font = ScaleFont("Segoe UI", 9.5F),
+                ForeColor = Color.FromArgb(94, 102, 112),
+                Margin = new Padding(0, 0, 0, 8),
+                MaximumSize = new Size(900, 0)
+            };
+
+            TableLayoutPanel header = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                ColumnCount = 2,
+                Margin = new Padding(0, 0, 0, ScaleSize(8))
+            };
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            header.Controls.Add(titleLabel, 0, 0);
+            header.Controls.Add(statusChip, 1, 0);
+            header.Controls.Add(descriptionLabel, 0, 1);
+            header.SetColumnSpan(descriptionLabel, 2);
+
+            Panel card = new Panel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.White,
+                Padding = new Padding(ScaleSize(16)),
+                Margin = new Padding(0, 0, 0, ScaleSize(12))
+            };
+
+            if (body != null)
+            {
+                body.Dock = DockStyle.Top;
+                card.Controls.Add(body);
+            }
+            card.Controls.Add(header);
+            header.Dock = DockStyle.Top;
+
+            return card;
+        }
+
+        private Label CreateStatusChip(string text, Color background, Color foreground)
+        {
+            return new Label
+            {
+                AutoSize = true,
+                Text = text,
+                BackColor = background,
+                ForeColor = foreground,
+                Font = ScaleFont("Segoe UI Semibold", 8.5F),
+                Padding = new Padding(ScaleSize(10), ScaleSize(4), ScaleSize(10), ScaleSize(4)),
+                Margin = new Padding(ScaleSize(12), 0, 0, 0)
+            };
+        }
+
+        private Control BuildModelStepBody()
+        {
+            TableLayoutPanel grid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 2,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0)
+            };
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+
+            groupInitAttachment = CreateModelGroup(
+                "Attachment Model",
+                BT_InitAttachmentBrowse_Click,
+                BT_InitAttachmentLoad_Click,
+                out TB_InitAttachmentPath,
+                out BT_InitAttachmentBrowse,
+                out BT_InitAttachmentLoad,
+                out LBL_InitAttachmentStatus);
+            groupInitAttachment.Margin = new Padding(0, 8, 8, 0);
+
+            groupInitDefect = CreateModelGroup(
+                "Defect Model",
+                BT_InitDefectBrowse_Click,
+                BT_InitDefectLoad_Click,
+                out TB_InitDefectPath,
+                out BT_InitDefectBrowse,
+                out BT_InitDefectLoad,
+                out LBL_InitDefectStatus);
+            groupInitDefect.Margin = new Padding(8, 8, 0, 0);
+
+            grid.Controls.Add(groupInitAttachment, 0, 0);
+            grid.Controls.Add(groupInitDefect, 1, 0);
+
+            return grid;
+        }
+
+        private GroupBox CreateModelGroup(
+            string title,
+            EventHandler browseHandler,
+            EventHandler loadHandler,
+            out TextBox pathDisplay,
+            out Button browseButton,
+            out Button loadButton,
+            out Label statusLabel)
+        {
+            GroupBox group = new GroupBox
+            {
+                Text = title,
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(12, 16, 12, 12)
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                ColumnCount = 3,
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0)
+            };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32F));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            pathDisplay = new TextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                Margin = new Padding(0, 0, 0, 4)
+            };
+            layout.Controls.Add(pathDisplay, 0, 0);
+            layout.SetColumnSpan(pathDisplay, 3);
+
+            browseButton = new Button
+            {
+                Text = "Browse...",
+                Dock = DockStyle.Fill
+            };
+            browseButton.Click += browseHandler;
+            layout.Controls.Add(browseButton, 1, 1);
+
+            loadButton = new Button
+            {
+                Text = "Load",
+                Dock = DockStyle.Fill,
+                Enabled = false
+            };
+            loadButton.Click += loadHandler;
+            layout.Controls.Add(loadButton, 2, 1);
+
+            statusLabel = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "Not loaded.",
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 4, 8, 4)
+            };
+            layout.Controls.Add(statusLabel, 0, 2);
+            layout.SetColumnSpan(statusLabel, 3);
+
+            group.Controls.Add(layout);
+            return group;
+        }
+
+        private Control BuildCameraStepBody()
+        {
+            TableLayoutPanel container = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 1,
+                Margin = new Padding(0)
+            };
+            container.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+
+            FlowLayoutPanel toolbar = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+
+            BT_CameraRefresh = new Button
+            {
+                Text = "Refresh Devices",
+                AutoSize = true,
+                Margin = new Padding(0, 0, 12, 0)
+            };
+            BT_CameraRefresh.Click += BT_CameraRefresh_Click;
+            toolbar.Controls.Add(BT_CameraRefresh);
+
+            Label hint = new Label
+            {
+                AutoSize = true,
+                Text = "Assign top and front cameras, then capture a preview to verify the feed.",
+                ForeColor = Color.FromArgb(94, 102, 112),
+                Margin = new Padding(0, 6, 0, 0)
+            };
+            toolbar.Controls.Add(hint);
+
+            container.Controls.Add(toolbar, 0, 0);
+
+            TableLayoutPanel cameraColumns = new TableLayoutPanel
+            {
+                ColumnCount = 2,
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 12, 0, 0)
+            };
+            cameraColumns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            cameraColumns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+
+            Label topDetail;
+            TableLayoutPanel topLayout = CreateCameraRoleLayout(
+                topCameraContext,
+                "Top Camera",
+                out CB_TopCameraSelect,
+                out BT_TopCameraConnect,
+                out BT_TopCameraCapture,
+                out topDetail,
+                out LBL_TopCameraStatus);
+
+            Label frontDetail;
+            TableLayoutPanel frontLayout = CreateCameraRoleLayout(
+                frontCameraContext,
+                "Front Camera",
+                out CB_FrontCameraSelect,
+                out BT_FrontCameraConnect,
+                out BT_FrontCameraCapture,
+                out frontDetail,
+                out LBL_FrontCameraStatus);
+
+            cameraColumns.Controls.Add(topLayout, 0, 0);
+            cameraColumns.Controls.Add(frontLayout, 1, 0);
+
+            container.Controls.Add(cameraColumns, 0, 1);
+
+            topCameraContext.Selector = CB_TopCameraSelect;
+            topCameraContext.ConnectButton = BT_TopCameraConnect;
+            topCameraContext.CaptureButton = BT_TopCameraCapture;
+            topCameraContext.StatusLabel = LBL_TopCameraStatus;
+            topCameraContext.DetailLabel = topDetail;
+
+            frontCameraContext.Selector = CB_FrontCameraSelect;
+            frontCameraContext.ConnectButton = BT_FrontCameraConnect;
+            frontCameraContext.CaptureButton = BT_FrontCameraCapture;
+            frontCameraContext.StatusLabel = LBL_FrontCameraStatus;
+            frontCameraContext.DetailLabel = frontDetail;
+
+            CB_TopCameraSelect.SelectedIndexChanged += (s, e) => UpdateCameraSelectionChanged(topCameraContext);
+            CB_FrontCameraSelect.SelectedIndexChanged += (s, e) => UpdateCameraSelectionChanged(frontCameraContext);
+            BT_TopCameraConnect.Click += (s, e) => ToggleCameraConnection(topCameraContext);
+            BT_FrontCameraConnect.Click += (s, e) => ToggleCameraConnection(frontCameraContext);
+            BT_TopCameraCapture.Click += (s, e) => CaptureCameraPreview(topCameraContext);
+            BT_FrontCameraCapture.Click += (s, e) => CaptureCameraPreview(frontCameraContext);
+
+            return container;
+        }
+
+        private Control BuildTurntableStepBody()
+        {
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                ColumnCount = 3,
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0)
+            };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            CB_TurntablePort = new ComboBox
+            {
+                Dock = DockStyle.Fill,
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            layout.Controls.Add(CB_TurntablePort, 0, 0);
+
+            BT_TurntableRefresh = new Button
+            {
+                Text = "Refresh",
+                Dock = DockStyle.Fill
+            };
+            BT_TurntableRefresh.Click += BT_TurntableRefresh_Click;
+            layout.Controls.Add(BT_TurntableRefresh, 1, 0);
+
+            BT_TurntableConnect = new Button
+            {
+                Text = "Connect",
+                Dock = DockStyle.Fill
+            };
+            BT_TurntableConnect.Click += BT_TurntableConnect_Click;
+            layout.Controls.Add(BT_TurntableConnect, 2, 0);
+
+            BT_TurntableHome = new Button
+            {
+                Text = "Home",
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Margin = new Padding(12, 4, 0, 4),
+                Enabled = false
+            };
+            BT_TurntableHome.Click += BT_TurntableHome_Click;
+            layout.Controls.Add(BT_TurntableHome, 2, 1);
+
+            LBL_TurntableStatus = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = "Disconnected.",
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 4, 8, 4),
+                Margin = new Padding(0, 8, 0, 0)
+            };
+            layout.Controls.Add(LBL_TurntableStatus, 0, 2);
+            layout.SetColumnSpan(LBL_TurntableStatus, 3);
+
+            return layout;
+        }
+
+        private Control BuildSummarySection()
+        {
+            Panel panel = new Panel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.White,
+                Padding = new Padding(16, 16, 16, 16),
+                Margin = new Padding(0)
+            };
+
+            FlowLayoutPanel flow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0)
+            };
+
+            LBL_InitSummaryModal = new Label
+            {
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 8, 8, 8),
+                Margin = new Padding(0, 0, 16, 0)
+            };
+
+            BT_InitBeginWorkflow = new Button
+            {
+                Text = "Begin Workflow",
+                AutoSize = true,
+                Enabled = false,
+                Margin = new Padding(0)
+            };
+            BT_InitBeginWorkflow.Click += BT_InitBeginWorkflow_Click;
+
+            flow.Controls.Add(LBL_InitSummaryModal);
+            flow.Controls.Add(BT_InitBeginWorkflow);
+
+            panel.Controls.Add(flow);
+
+            return panel;
+        }
+
+        private void BT_OpenInitWizard_Click(object sender, EventArgs e)
+        {
+            ShowInitializationWizard();
+        }
+
+        private void CHK_UseRecordedRun_CheckedChanged(object sender, EventArgs e)
+        {
+            if (isUpdatingRecordedRunUI)
+            {
+                return;
+            }
+
+            useRecordedRun = CHK_UseRecordedRun?.Checked == true;
+            if (initSettings != null)
+            {
+                initSettings.UseRecordedRun = useRecordedRun;
+                SaveInitializationSettings();
+            }
+
+            UpdateRecordedRunUiState();
+            UpdateInitSummary();
+        }
+
+        private void BT_SelectRecordedRun_Click(object sender, EventArgs e)
+        {
+            using (FolderBrowserDialog dialog = new FolderBrowserDialog())
+            {
+                dialog.Description = "Select a saved run folder";
+                if (!string.IsNullOrWhiteSpace(recordedRunPath) && Directory.Exists(recordedRunPath))
+                {
+                    dialog.SelectedPath = recordedRunPath;
+                }
+
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    recordedRunPath = dialog.SelectedPath;
+                    if (initSettings != null)
+                    {
+                        initSettings.RecordedRunPath = recordedRunPath;
+                        SaveInitializationSettings();
+                    }
+                    UpdateRecordedRunUiState();
+                    UpdateInitSummary();
+                }
+            }
+        }
+
+        private void ShowInitializationWizard(string reason = null)
+        {
+            EnsureInitLayout();
+
+            if (LBL_InitPrompt != null && !LBL_InitPrompt.IsDisposed)
+            {
+                if (string.IsNullOrWhiteSpace(reason))
+                {
+                    LBL_InitPrompt.Visible = false;
+                }
+                else
+                {
+                    LBL_InitPrompt.Text = reason;
+                    LBL_InitPrompt.Visible = true;
+                }
+            }
+
+            UpdateInitSummary();
+
+            if (activeInitDialog != null && !activeInitDialog.IsDisposed)
+            {
+                activeInitDialog.BringToFront();
+                activeInitDialog.Activate();
+                return;
+            }
+
+            if (BT_InitBeginWorkflow != null && !BT_InitBeginWorkflow.IsDisposed)
+            {
+                BT_InitBeginWorkflow.DialogResult = DialogResult.OK;
+            }
+
+            using (InitializationDialog dialog = new InitializationDialog(initLayout))
+            {
+                activeInitDialog = dialog;
+                if (BT_InitBeginWorkflow != null && !BT_InitBeginWorkflow.IsDisposed)
+                {
+                    dialog.AcceptButton = BT_InitBeginWorkflow;
+                }
+
+                dialog.ShowDialog(this);
+                activeInitDialog = null;
+            }
+
+            UpdateInitSummary();
+        }
+
+        private void BT_InitBeginWorkflow_Click(object sender, EventArgs e)
+        {
+            if (!IsInitializationComplete())
+            {
+                MessageBox.Show(
+                    this,
+                    "Please complete all initialization steps before beginning the workflow.",
+                    "Initialization Incomplete",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                UpdateInitSummary();
+                return;
+            }
+
+            if (activeInitDialog != null)
+            {
+                activeInitDialog.DialogResult = DialogResult.OK;
+                activeInitDialog.Close();
+            }
+        }
+
+        private bool IsInitializationComplete()
+        {
+            return attachmentContext?.IsLoaded == true
+                && defectContext?.IsLoaded == true
+                && topCameraContext?.IsConnected == true
+                && frontCameraContext?.IsConnected == true
+                && turntableController?.IsConnected == true
+                && turntableController?.IsHomed == true;
+        }
+
+        private void SetStepStatus(Label label, string text, Color background, Color foreground)
+        {
+            if (label == null || label.IsDisposed)
+            {
+                return;
+            }
+
+            StyleStepStatusChip(label);
+            label.Text = text;
+            label.BackColor = background;
+            label.ForeColor = foreground;
+        }
+
+        private void StyleStepStatusChip(Label label)
+        {
+            if (label == null || label.IsDisposed)
+            {
+                return;
+            }
+
+            label.Font = ScaleFont("Segoe UI Semibold", 8.5F);
+            label.Padding = new Padding(ScaleSize(10), ScaleSize(4), ScaleSize(10), ScaleSize(4));
+            label.Margin = new Padding(ScaleSize(12), 0, 0, 0);
+        }
+
+        private sealed class InitializationSettings
+        {
+            public string AttachmentPath { get; set; }
+            public string DefectPath { get; set; }
+            public string TopCameraSerial { get; set; }
+            public string FrontCameraSerial { get; set; }
+            public string TurntablePort { get; set; }
+            public bool UseRecordedRun { get; set; }
+            public string RecordedRunPath { get; set; }
+
+            public static InitializationSettings Load(string path)
+            {
+                InitializationSettings settings = new InitializationSettings();
+                try
+                {
+                    if (!File.Exists(path))
+                    {
+                        return settings;
+                    }
+
+                    foreach (string rawLine in File.ReadAllLines(path))
+                    {
+                        if (string.IsNullOrWhiteSpace(rawLine))
+                        {
+                            continue;
+                        }
+
+                        string line = rawLine.Trim();
+                        if (line.StartsWith("#", StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+
+                        int separatorIndex = line.IndexOf('=');
+                        if (separatorIndex < 0)
+                        {
+                            continue;
+                        }
+
+                        string key = line.Substring(0, separatorIndex).Trim();
+                        string value = line.Substring(separatorIndex + 1).Trim();
+
+                        switch (key)
+                        {
+                            case "AttachmentPath":
+                                settings.AttachmentPath = value;
+                                break;
+                            case "DefectPath":
+                                settings.DefectPath = value;
+                                break;
+                            case "TopCameraSerial":
+                                settings.TopCameraSerial = value;
+                                break;
+                            case "FrontCameraSerial":
+                                settings.FrontCameraSerial = value;
+                                break;
+                            case "TurntablePort":
+                                settings.TurntablePort = value;
+                                break;
+                            case "UseRecordedRun":
+                                settings.UseRecordedRun = bool.TryParse(value, out bool useRecorded) && useRecorded;
+                                break;
+                            case "RecordedRunPath":
+                                settings.RecordedRunPath = value;
+                                break;
+                        }
+                    }
+                }
+                catch
+                {
+                    return new InitializationSettings();
+                }
+
+                return settings;
+            }
+
+            public void Save(string path)
+            {
+                string directory = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                StringBuilder builder = new StringBuilder();
+                builder.AppendLine($"AttachmentPath={AttachmentPath ?? string.Empty}");
+                builder.AppendLine($"DefectPath={DefectPath ?? string.Empty}");
+                builder.AppendLine($"TopCameraSerial={TopCameraSerial ?? string.Empty}");
+                builder.AppendLine($"FrontCameraSerial={FrontCameraSerial ?? string.Empty}");
+                builder.AppendLine($"TurntablePort={TurntablePort ?? string.Empty}");
+                builder.AppendLine($"UseRecordedRun={UseRecordedRun}");
+                builder.AppendLine($"RecordedRunPath={RecordedRunPath ?? string.Empty}");
+                File.WriteAllText(path, builder.ToString());
+            }
+        }
+
+        private sealed class RunSession
+        {
+            public RunSession(string root)
+            {
+                Root = root ?? throw new ArgumentNullException(nameof(root));
+                TopFolder = Path.Combine(root, "Top");
+                FrontFolder = Path.Combine(root, "Front");
+                ResultsFolder = Path.Combine(root, "Results");
+            }
+
+            public string Root { get; }
+            public string TopFolder { get; }
+            public string FrontFolder { get; }
+            public string ResultsFolder { get; }
+            public string TopImagePath => Path.Combine(TopFolder, "Top.png");
+            public string RecordedSourcePath { get; set; }
+        }
+
+        private sealed class InitializationDialog : Form
+        {
+            private readonly Control content;
+            private readonly Panel contentHost;
+            private readonly Button closeButton;
+
+            public InitializationDialog(Control content)
+            {
+                this.content = content ?? throw new ArgumentNullException(nameof(content));
+
+                Text = "System Initialization";
+                StartPosition = FormStartPosition.CenterParent;
+                Size = new Size(1100, 720);
+                MinimumSize = new Size(900, 620);
+                FormBorderStyle = FormBorderStyle.FixedDialog;
+                MaximizeBox = false;
+                MinimizeBox = false;
+                ShowInTaskbar = false;
+
+                contentHost = new Panel
+                {
+                    Dock = DockStyle.Fill,
+                    AutoScroll = true,
+                    BackColor = Color.FromArgb(246, 248, 252)
+                };
+                Controls.Add(contentHost);
+
+                if (content.AutoSize)
+                {
+                    content.Dock = DockStyle.Top;
+                }
+                else
+                {
+                    content.Dock = DockStyle.Fill;
+                }
+
+                contentHost.Controls.Add(content);
+
+                closeButton = new Button
+                {
+                    Text = "Close",
+                    DialogResult = DialogResult.Cancel,
+                    Size = new Size(120, 36),
+                    Margin = new Padding(0)
+                };
+
+                FlowLayoutPanel footer = new FlowLayoutPanel
+                {
+                    Dock = DockStyle.Bottom,
+                    FlowDirection = FlowDirection.RightToLeft,
+                    Padding = new Padding(16, 8, 16, 12),
+                    Height = 60
+                };
+                footer.Controls.Add(closeButton);
+                Controls.Add(footer);
+
+                CancelButton = closeButton;
+            }
+
+            protected override void OnFormClosing(FormClosingEventArgs e)
+            {
+                if (content != null && !content.IsDisposed)
+                {
+                    contentHost.Controls.Remove(content);
+                }
+
+                base.OnFormClosing(e);
+            }
+        }
+
+        private void EnsureInitLayout()
+        {
+            if (initLayout != null && !initLayout.IsDisposed)
+            {
+                return;
+            }
+
+            initLayout = BuildInitializationLayout();
+            BindModelContextUI();
+            RefreshCameraUiState(topCameraContext);
+            RefreshCameraUiState(frontCameraContext);
+            RefreshCameraList();
+            UpdateInitSummary();
+        }
+
+        private void InitializeResponsiveLayout()
+        {
+            if (responsiveLayoutInitialized)
+            {
+                ApplyResponsiveLayout(force: true);
+                return;
+            }
+
+            responsiveLayoutInitialized = true;
+            Resize -= DemoApp_Resize;
+            Resize += DemoApp_Resize;
+            ApplyResponsiveLayout(force: true);
+        }
+
+        private void DemoApp_Resize(object sender, EventArgs e)
+        {
+            ApplyResponsiveLayout();
+        }
+
+        private void ApplyResponsiveLayout(bool force = false)
+        {
+            if (!responsiveLayoutInitialized && !force)
+            {
+                return;
+            }
+
+            float scaleFactor = DeviceDpi / 96f;
+            bool shouldCompact = ClientSize.Width < CompactLayoutWidthThreshold || scaleFactor >= CompactLayoutDpiThreshold;
+
+            if (!force && shouldCompact == usingCompactLayout)
+            {
+                return;
+            }
+
+            usingCompactLayout = shouldCompact;
+
+            tableLayoutPanelMain.SuspendLayout();
+            panelStepsHost.SuspendLayout();
+            try
+            {
+                tableLayoutPanelMain.Controls.Clear();
+                tableLayoutPanelMain.ColumnStyles.Clear();
+                tableLayoutPanelMain.RowStyles.Clear();
+                panelStepsHost.Controls.Remove(tableLayoutSteps);
+                panelStepsHost.Controls.Clear();
+
+                tableLayoutSteps.Dock = DockStyle.Top;
+                tableLayoutSteps.Margin = new Padding(0);
+                panelStepsHost.Controls.Add(tableLayoutSteps);
+                panelStepsHost.Dock = DockStyle.Fill;
+                panelStepsHost.Padding = new Padding(0);
+                panelStepsHost.AutoScroll = true;
+
+                if (shouldCompact)
+                {
+                    tableLayoutPanelMain.ColumnCount = 1;
+                    tableLayoutPanelMain.RowCount = 2;
+                    tableLayoutPanelMain.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+                    tableLayoutPanelMain.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                    tableLayoutPanelMain.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+                    panelStepsHost.Margin = new Padding(0, 0, 0, 12);
+                    tableLayoutImages.Dock = DockStyle.Fill;
+                    tableLayoutImages.Margin = new Padding(0);
+
+                    tableLayoutPanelMain.Controls.Add(panelStepsHost, 0, 0);
+                    tableLayoutPanelMain.Controls.Add(tableLayoutImages, 0, 1);
+                }
+                else
+                {
+                    tableLayoutPanelMain.ColumnCount = 2;
+                    tableLayoutPanelMain.RowCount = 1;
+                    tableLayoutPanelMain.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38F));
+                    tableLayoutPanelMain.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62F));
+                    tableLayoutPanelMain.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+                    panelStepsHost.Margin = new Padding(0, 0, 12, 0);
+                    tableLayoutImages.Dock = DockStyle.Fill;
+                    tableLayoutImages.Margin = new Padding(0);
+
+                    tableLayoutPanelMain.Controls.Add(panelStepsHost, 0, 0);
+                    tableLayoutPanelMain.Controls.Add(tableLayoutImages, 1, 0);
+                }
+
+                tableLayoutSteps.PerformLayout();
+                Size preferred = tableLayoutSteps.PreferredSize;
+                panelStepsHost.AutoScrollMinSize = new Size(0, preferred.Height + 16);
+            }
+            finally
+            {
+                panelStepsHost.ResumeLayout(true);
+                tableLayoutPanelMain.ResumeLayout(true);
+            }
+        }
+
+        private void AdjustRecordedRunLayout()
+        {
+            if (recordedRunPanel == null || TB_RecordedRunPath == null || BT_SelectRecordedRun == null || CHK_UseRecordedRun == null)
+            {
+                return;
+            }
+
+            int availableWidth = recordedRunPanel.ClientSize.Width
+                - CHK_UseRecordedRun.Width
+                - BT_SelectRecordedRun.Width
+                - ScaleSize(32);
+
+            availableWidth = Math.Max(ScaleSize(240), availableWidth);
+
+            TB_RecordedRunPath.Width = availableWidth;
+            TB_RecordedRunPath.Height = ScaleSize(28);
         }
 
         private void InitializeLoadingIndicator()
@@ -4070,8 +5656,8 @@ tabInitialize.Controls.Add(initLayout);
             {
                 groupBox.BackColor = surface;
                 groupBox.ForeColor = Color.FromArgb(60, 72, 88);
-                groupBox.Font = new Font("Segoe UI Semibold", 9.5F);
-                groupBox.Padding = new Padding(12, 24, 12, 12);
+                groupBox.Font = ScaleFont("Segoe UI Semibold", 9.5F);
+                groupBox.Padding = new Padding(ScaleSize(12), ScaleSize(24), ScaleSize(12), ScaleSize(12));
             }
             else
             {
@@ -4084,7 +5670,7 @@ tabInitialize.Controls.Add(initLayout);
                 panel.Padding = new Padding(0);
             }
 
-            container.Margin = new Padding(8);
+            container.Margin = new Padding(ScaleSize(8));
             container.ForeColor = Color.FromArgb(40, 48, 56);
 
             if (container is Control ctrl)
@@ -4125,9 +5711,9 @@ tabInitialize.Controls.Add(initLayout);
             button.FlatAppearance.BorderSize = 0;
             button.BackColor = accent;
             button.ForeColor = Color.White;
-            button.Font = new Font("Segoe UI Semibold", 9.5F);
-            button.Height = 38;
-            button.Margin = new Padding(6);
+            button.Font = ScaleFont("Segoe UI Semibold", 9.5F);
+            button.Height = ScaleSize(38);
+            button.Margin = new Padding(ScaleSize(8));
             button.Cursor = Cursors.Hand;
 
             button.MouseEnter += (s, e) => button.BackColor = hoverAccent;
@@ -4140,7 +5726,7 @@ tabInitialize.Controls.Add(initLayout);
             button.FlatAppearance.BorderSize = 0;
             button.BackColor = accent;
             button.ForeColor = Color.White;
-            button.Font = new Font("Segoe UI", 9F);
+            button.Font = ScaleFont("Segoe UI", 9F);
             button.Cursor = Cursors.Hand;
 
             button.MouseEnter += (s, e) => button.BackColor = hoverAccent;
@@ -4154,10 +5740,12 @@ tabInitialize.Controls.Add(initLayout);
                 return;
             }
 
+            label.AutoSize = true;
+            label.Dock = DockStyle.Top;
             label.BorderStyle = BorderStyle.None;
-            label.Padding = new Padding(16, 10, 16, 10);
-            label.Margin = new Padding(8, 8, 8, 0);
-            label.Font = new Font("Segoe UI Semibold", 9.5F);
+            label.Padding = new Padding(ScaleSize(16), ScaleSize(10), ScaleSize(16), ScaleSize(10));
+            label.Margin = new Padding(ScaleSize(8), ScaleSize(8), ScaleSize(8), 0);
+            label.Font = ScaleFont("Segoe UI Semibold", 9.5F);
             label.BackColor = statusNeutralBackground;
             label.ForeColor = statusNeutralForeground;
         }
@@ -4207,16 +5795,16 @@ tabInitialize.Controls.Add(initLayout);
 
             grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(241, 243, 248);
             grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.FromArgb(58, 66, 78);
-            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI Semibold", 9F);
+            grid.ColumnHeadersDefaultCellStyle.Font = ScaleFont("Segoe UI Semibold", 9F);
             grid.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleLeft;
-            grid.ColumnHeadersHeight = 34;
+            grid.ColumnHeadersHeight = ScaleSize(34);
 
             grid.DefaultCellStyle.BackColor = surface;
             grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(223, 230, 253);
             grid.DefaultCellStyle.SelectionForeColor = accent;
             grid.DefaultCellStyle.ForeColor = textColor;
-            grid.DefaultCellStyle.Font = new Font("Segoe UI", 9F);
-            grid.RowTemplate.Height = 36;
+            grid.DefaultCellStyle.Font = ScaleFont("Segoe UI", 9F);
+            grid.RowTemplate.Height = ScaleSize(36);
 
             grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(250, 251, 253);
             grid.RowHeadersVisible = false;
@@ -4584,7 +6172,7 @@ tabInitialize.Controls.Add(initLayout);
 
             if (logicRoot.Children.Count == 0)
             {
-                ApplyStatusToAll("Result: PASS (no rules defined)", statusPassBackground, statusPassForeground);
+                ApplyStatusToAll(StatusPassNoRulesMessage, statusPassBackground, statusPassForeground);
                 return;
             }
 
@@ -4621,7 +6209,7 @@ tabInitialize.Controls.Add(initLayout);
             }
             else
             {
-                ApplyStatusToAll("Result: PASS (no defect rules matched)", statusPassBackground, statusPassForeground);
+                ApplyStatusToAll(StatusPassNoRulesMessage, statusPassBackground, statusPassForeground);
             }
         }
 
@@ -6268,6 +7856,16 @@ internal class DetectImg : IDisposable
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
 
 
 

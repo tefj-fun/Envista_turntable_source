@@ -26,6 +26,9 @@
         private void InitializeComponent()
         {
             this.tableLayoutPanelMain = new System.Windows.Forms.TableLayoutPanel();
+            this.leftTabs = new System.Windows.Forms.TabControl();
+            this.tabWorkflow = new System.Windows.Forms.TabPage();
+            this.panelStepsHost = new System.Windows.Forms.Panel();
             this.tableLayoutSteps = new System.Windows.Forms.TableLayoutPanel();
             this.groupStep1 = new System.Windows.Forms.GroupBox();
             this.tableLayoutProject = new System.Windows.Forms.TableLayoutPanel();
@@ -68,6 +71,8 @@
             this.FrontAreaColumn = new System.Windows.Forms.DataGridViewTextBoxColumn();
             this.FrontBoundsColumn = new System.Windows.Forms.DataGridViewTextBoxColumn();
             this.tableLayoutPanelMain.SuspendLayout();
+            this.leftTabs.SuspendLayout();
+            this.tabWorkflow.SuspendLayout();
             this.tableLayoutSteps.SuspendLayout();
             this.groupStep1.SuspendLayout();
             this.tableLayoutProject.SuspendLayout();
@@ -98,7 +103,7 @@
             this.tableLayoutPanelMain.ColumnCount = 2;
             this.tableLayoutPanelMain.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 38F));
             this.tableLayoutPanelMain.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 62F));
-            this.tableLayoutPanelMain.Controls.Add(this.tableLayoutSteps, 0, 0);
+            this.tableLayoutPanelMain.Controls.Add(this.leftTabs, 0, 0);
             this.tableLayoutPanelMain.Controls.Add(this.tableLayoutImages, 1, 0);
             this.tableLayoutPanelMain.Dock = System.Windows.Forms.DockStyle.Fill;
             this.tableLayoutPanelMain.Location = new System.Drawing.Point(0, 0);
@@ -109,8 +114,49 @@
             this.tableLayoutPanelMain.Size = new System.Drawing.Size(1184, 661);
             this.tableLayoutPanelMain.TabIndex = 0;
             // 
+            // leftTabs
+            // 
+            this.leftTabs.Controls.Add(this.tabWorkflow);
+            this.leftTabs.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.leftTabs.ItemSize = new System.Drawing.Size(120, 28);
+            this.leftTabs.Location = new System.Drawing.Point(0, 0);
+            this.leftTabs.Margin = new System.Windows.Forms.Padding(0, 0, 6, 0);
+            this.leftTabs.Multiline = true;
+            this.leftTabs.Name = "leftTabs";
+            this.leftTabs.SelectedIndex = 0;
+            this.leftTabs.Size = new System.Drawing.Size(449, 661);
+            this.leftTabs.SizeMode = System.Windows.Forms.TabSizeMode.Fixed;
+            this.leftTabs.TabIndex = 0;
+            // 
+            // tabWorkflow
+            // 
+            this.tabWorkflow.Controls.Add(this.panelStepsHost);
+            this.tabWorkflow.Location = new System.Drawing.Point(4, 32);
+            this.tabWorkflow.Margin = new System.Windows.Forms.Padding(0);
+            this.tabWorkflow.Name = "tabWorkflow";
+            this.tabWorkflow.Padding = new System.Windows.Forms.Padding(0);
+            this.tabWorkflow.Size = new System.Drawing.Size(441, 625);
+            this.tabWorkflow.TabIndex = 0;
+            this.tabWorkflow.Text = "Workflow";
+            this.tabWorkflow.UseVisualStyleBackColor = true;
+            // 
+            // panelStepsHost
+            // 
+            this.panelStepsHost.AutoScroll = true;
+            this.panelStepsHost.AutoScrollMargin = new System.Drawing.Size(0, 16);
+            this.panelStepsHost.Controls.Add(this.tableLayoutSteps);
+            this.panelStepsHost.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.panelStepsHost.Location = new System.Drawing.Point(0, 0);
+            this.panelStepsHost.Margin = new System.Windows.Forms.Padding(0);
+            this.panelStepsHost.Name = "panelStepsHost";
+            this.panelStepsHost.Padding = new System.Windows.Forms.Padding(0);
+            this.panelStepsHost.Size = new System.Drawing.Size(441, 625);
+            this.panelStepsHost.TabIndex = 0;
+            // 
             // tableLayoutSteps
             // 
+            this.tableLayoutSteps.AutoSize = true;
+            this.tableLayoutSteps.AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink;
             this.tableLayoutSteps.ColumnCount = 1;
             this.tableLayoutSteps.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100F));
             this.tableLayoutSteps.Controls.Add(this.groupStep1, 0, 0);
@@ -119,9 +165,9 @@
             this.tableLayoutSteps.Controls.Add(this.groupGallery, 0, 3);
             this.tableLayoutSteps.Controls.Add(this.groupStep5, 0, 4);
             this.tableLayoutSteps.Controls.Add(this.groupStep7, 0, 5);
-            this.tableLayoutSteps.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.tableLayoutSteps.Dock = System.Windows.Forms.DockStyle.Top;
             this.tableLayoutSteps.Location = new System.Drawing.Point(0, 0);
-            this.tableLayoutSteps.Margin = new System.Windows.Forms.Padding(0, 0, 6, 0);
+            this.tableLayoutSteps.Margin = new System.Windows.Forms.Padding(0);
             this.tableLayoutSteps.Name = "tableLayoutSteps";
             this.tableLayoutSteps.RowCount = 6;
             this.tableLayoutSteps.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize));
@@ -130,7 +176,7 @@
             this.tableLayoutSteps.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100F));
             this.tableLayoutSteps.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize));
             this.tableLayoutSteps.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize));
-            this.tableLayoutSteps.Size = new System.Drawing.Size(448, 661);
+            this.tableLayoutSteps.Size = new System.Drawing.Size(449, 661);
             this.tableLayoutSteps.TabIndex = 0;
             // 
             // groupStep1
@@ -214,7 +260,7 @@
             this.groupStep4.Size = new System.Drawing.Size(442, 77);
             this.groupStep4.TabIndex = 2;
             this.groupStep4.TabStop = false;
-            this.groupStep4.Text = "4. Run Detection";
+            this.groupStep4.Text = "Run Detection";
             // 
             // BT_Detect
             // 
@@ -259,7 +305,7 @@
             this.groupStep5.Size = new System.Drawing.Size(442, 150);
             this.groupStep5.TabIndex = 4;
             this.groupStep5.TabStop = false;
-            this.groupStep5.Text = "5. Log";
+            this.groupStep5.Text = "Log";
             // 
             // RTB_Info
             // 
@@ -561,14 +607,18 @@
             // 
             // DemoApp
             // 
-            this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 12F);
-            this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
+            this.AutoScaleDimensions = new System.Drawing.SizeF(96F, 96F);
+            this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi;
             this.ClientSize = new System.Drawing.Size(1184, 661);
             this.Controls.Add(this.tableLayoutPanelMain);
             this.Name = "DemoApp";
             this.Text = "SolVision Demo";
             this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.DemoApp_FormClosing);
             this.tableLayoutPanelMain.ResumeLayout(false);
+            this.leftTabs.ResumeLayout(false);
+            this.tabWorkflow.ResumeLayout(false);
+            this.panelStepsHost.ResumeLayout(false);
+            this.panelStepsHost.PerformLayout();
             this.tableLayoutSteps.ResumeLayout(false);
             this.groupStep1.ResumeLayout(false);
             this.tableLayoutProject.ResumeLayout(false);
@@ -604,6 +654,7 @@
         #endregion
 
         private System.Windows.Forms.TableLayoutPanel tableLayoutPanelMain;
+        private System.Windows.Forms.Panel panelStepsHost;
         private System.Windows.Forms.TableLayoutPanel tableLayoutSteps;
         private System.Windows.Forms.GroupBox groupStep1;
         private System.Windows.Forms.TableLayoutPanel tableLayoutProject;
