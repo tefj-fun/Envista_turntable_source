@@ -1,4 +1,4 @@
-# Envista Turntable Source
+﻿# Envista Turntable Source
 
 This repository contains the full **C# WinForms** solution for the Envista turntable inspection demo.  
 It is the canonical source-of-truth for engineering changes; the matching production binaries are
@@ -48,15 +48,15 @@ Key libraries:
 ```
 DemoApp.sln
 DemoApp/
-├─ DemoApp.csproj
-├─ DemoApp.cs / Designer / resx         → main WinForms Form
-├─ Program.cs                            → entry point
-├─ Properties/                           → Assembly info, resources, settings
-├─ Dependencies/Huaray/                  → Camera SDK DLLs (copied local)
-├─ dll/                                  → SolVision native support DLLs
-├─ images/                               → UI icons / samples
-├─ bin_temp/                             → scratch output dir used during builds (git-tracked for convenience)
-└─ ...                                   → other assets noted in the project file
+G��G�� DemoApp.csproj
+G��G�� DemoApp.cs / Designer / resx         G�� main WinForms Form
+G��G�� Program.cs                            G�� entry point
+G��G�� Properties/                           G�� Assembly info, resources, settings
+G��G�� Dependencies/Huaray/                  G�� Camera SDK DLLs (copied local)
+G��G�� dll/                                  G�� SolVision native support DLLs
+G��G�� images/                               G�� UI icons / samples
+G��G�� bin_temp/                             G�� scratch output dir used during builds (git-tracked for convenience)
+G��G�� ...                                   G�� other assets noted in the project file
 ```
 
 > **Note**: `bin/`, `obj/`, `Captured/`, and other transient build folders are ignored via `.gitignore`.
@@ -85,8 +85,8 @@ Install vendor SDKs **before** running within Visual Studio to avoid missing DLL
 2. Select build configuration:
    - `Release | x64` for production (matches the stable binary build).  
    - `Debug | x64` for development.
-3. Build (`Build → Build Solution`).
-4. Run (`Debug → Start Debugging` or `F5`). Ensure your hardware is connected.
+3. Build (`Build G�� Build Solution`).
+4. Run (`Debug G�� Start Debugging` or `F5`). Ensure your hardware is connected.
 
 ### Optional command-line build
 
@@ -105,7 +105,7 @@ msbuild DemoApp.sln /p:Configuration=Release /p:Platform=x64
 3. **Cameras**:
    - USB top camera (Huaray).  
    - GigE front camera (Huaray). Ensure NIC and camera share same subnet (e.g., 169.254.x.x).  
-   - Use Huaray “MV Viewer” to confirm the cameras stream before running the app.
+   - Use Huaray GǣMV ViewerGǥ to confirm the cameras stream before running the app.
 
 4. **GPU**: optional but recommended. Ensure NVIDIA drivers are current if using CUDA.
 
@@ -116,8 +116,8 @@ msbuild DemoApp.sln /p:Configuration=Release /p:Platform=x64
 ### Initialize Tab
 
 1. **Load Projects**  
-   - Attachment `.tsp` → loads into `attachmentContext`.  
-   - Defect `.tsp` → loads into `defectContext`.  
+   - Attachment `.tsp` G�� loads into `attachmentContext`.  
+   - Defect `.tsp` G�� loads into `defectContext`.  
    Status colors (neutral / success / warning) reflect model loading.
 
 2. **Cameras**  
@@ -143,7 +143,7 @@ msbuild DemoApp.sln /p:Configuration=Release /p:Platform=x64
 2. **Automatic Capture Sequence**  
    - For each attachment point:  
      - Rotate the turntable (CW or CCW depending on orientation).  
-     - Capture front image; save to `Captured/`.  
+     - Capture front image; save into the active run directory under `Runs/Run_<timestamp>/Front/`\.  
      - When returning home, process images with the **defect** model.
 
 3. **Front Inspections UI**  
@@ -155,6 +155,27 @@ msbuild DemoApp.sln /p:Configuration=Release /p:Platform=x64
    - Shows PASS/FAIL after logic evaluation (see next section).
 
 ---
+
+### Run Output Layout
+
+Each detection creates a timestamped folder under `Runs` alongside the executable:
+
+```
+Runs/
+  Run_YYYYMMDD_HHmmssfff/
+    Top/
+      Top.png
+    Front/
+      Front_Index##_Angle±XXX.png
+    Results/
+      DefectSummary.csv
+```
+
+- `Top/Top.png` is the image used for attachment detection.
+- `Front/` holds one PNG per attachment index.
+- `Results/DefectSummary.csv` aggregates all detections for the run.
+
+The legacy `Captured/` folder is retained only for sample data; new runs always use the `Runs` hierarchy.
 
 ## Logic Builder
 
@@ -197,7 +218,7 @@ bool fail = EvaluateNode(logicRoot, CollectCurrentDefectDetections(), out LogicN
 - **Threading**: heavy operations (detection, turntable moves) run on background threads; UI updates must call `BeginInvoke`.
 - **Logging**: use `outToLog()` with `LogStatus` enum to keep operator feedback consistent.
 - **Resource Management**: dispose `Bitmap`, `Mat`, and `FrontInspectionResult` objects to prevent memory leaks.
-- **Error Handling**: user-facing warnings should explain corrective actions (e.g., “Connect front camera”).
+- **Error Handling**: user-facing warnings should explain corrective actions (e.g., GǣConnect front cameraGǥ).
 - **Testing**: manual regression across detection scenarios (pass/fail, missing hardware). Automated tests are not yet present; consider adding for future.
 
 ---
@@ -206,11 +227,11 @@ bool fail = EvaluateNode(logicRoot, CollectCurrentDefectDetections(), out LogicN
 
 AI coding tools (GitHub Copilot, ChatGPT, etc.) are welcome, but follow these guardrails:
 
-1. **Stay in this repo** – always modify source here, never the binary release repo.
-2. **Explain changes** – when using AI to generate code, review carefully, add comments if logic is complex, and document assumptions.
-3. **Protect hardware safety** – review any change touching turntable motion, camera drivers, or asynchronous operations.
-4. **Formatting & style** – keep coding style consistent with existing files; run `Format Document` (Ctrl+K, Ctrl+D) in VS.
-5. **Commit hygiene** – use descriptive messages (e.g., `Improve defect gallery spacing`) and push via pull requests when collaborating.
+1. **Stay in this repo** G�� always modify source here, never the binary release repo.
+2. **Explain changes** G�� when using AI to generate code, review carefully, add comments if logic is complex, and document assumptions.
+3. **Protect hardware safety** G�� review any change touching turntable motion, camera drivers, or asynchronous operations.
+4. **Formatting & style** G�� keep coding style consistent with existing files; run `Format Document` (Ctrl+K, Ctrl+D) in VS.
+5. **Commit hygiene** G�� use descriptive messages (e.g., `Improve defect gallery spacing`) and push via pull requests when collaborating.
 
 If AI suggests large refactors, discuss with the team before landing to avoid breaking workflows.
 
@@ -220,7 +241,7 @@ If AI suggests large refactors, discuss with the team before landing to avoid br
 
 1. **Develop** & test changes on a feature branch.
 2. **Merge** into `main` (or designated release branch).
-3. **Build** `Release|x64` → verify full workflow with real hardware.
+3. **Build** `Release|x64` G�� verify full workflow with real hardware.
 4. **Copy** `DemoApp/bin/x64/Release` to `DemoApp/bin/x64/Stable`.
 5. **Package** the stable folder into the binary repo:
    ```powershell
@@ -245,4 +266,5 @@ For escalations, contact the Desktop Vision/Envista inspection team or the hardw
 
 ---
 
-Happy coding! 💡 Let the team know via Slack when you push significant changes so the stable build can be regenerated. Remember: source changes happen here; production binaries live in `Envista_turntable_stable`.
+Happy coding! =��� Let the team know via Slack when you push significant changes so the stable build can be regenerated. Remember: source changes happen here; production binaries live in `Envista_turntable_stable`.
+
