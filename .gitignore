@@ -36,3 +36,4 @@ packages/
 
 # Others
 Captured/
+**/.claude/*.local.json

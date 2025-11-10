@@ -1,0 +1,33 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch DemoApp (Debug)",
+            "type": "clr",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "${workspaceFolder}/DemoApp/bin/Debug/DemoApp.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/DemoApp/bin/Debug",
+            "stopAtEntry": false,
+            "console": "internalConsole"
+        },
+        {
+            "name": "Launch DemoApp (x64 Debug)",
+            "type": "clr",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "${workspaceFolder}/DemoApp/bin/x64/Debug/DemoApp.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}/DemoApp/bin/x64/Debug",
+            "stopAtEntry": false,
+            "console": "internalConsole"
+        },
+        {
+            "name": "Attach to Process",
+            "type": "clr",
+            "request": "attach",
+            "processName": "DemoApp.exe"
+        }
+    ]
+}

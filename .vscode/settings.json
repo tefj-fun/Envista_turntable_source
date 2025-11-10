@@ -1,0 +1,13 @@
+{
+    "dotnet.preferCSharpExtension": true,
+    "omnisharp.enableRoslynAnalyzers": true,
+    "omnisharp.enableEditorConfigSupport": true,
+    "files.exclude": {
+        "**/bin": true,
+        "**/obj": true
+    },
+    "files.watcherExclude": {
+        "**/bin/**": true,
+        "**/obj/**": true
+    }
+}

@@ -606,11 +606,12 @@
             this.FrontBoundsColumn.ReadOnly = true;
             // 
             // DemoApp
-            // 
+            //
             this.AutoScaleDimensions = new System.Drawing.SizeF(96F, 96F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi;
             this.ClientSize = new System.Drawing.Size(1184, 661);
             this.Controls.Add(this.tableLayoutPanelMain);
+            this.MinimumSize = new System.Drawing.Size(800, 600);
             this.Name = "DemoApp";
             this.Text = "SolVision Demo";
             this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.DemoApp_FormClosing);

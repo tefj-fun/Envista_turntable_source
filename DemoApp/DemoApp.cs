@@ -22,6 +22,7 @@ using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Drawing.Text;
 using MVSDK_Net;
+using Newtonsoft.Json;
 
 namespace DemoApp
 {
@@ -86,15 +87,21 @@ namespace DemoApp
         private readonly Dictionary<string, Image> glyphImageCache = new Dictionary<string, Image>();
 
         private ModelContext attachmentContext;
+        private ModelContext frontAttachmentContext;
         private ModelContext defectContext;
 
         private TableLayoutPanel initLayout;
         private GroupBox groupInitAttachment;
+        private GroupBox groupInitFrontAttachment;
         private GroupBox groupInitDefect;
         private TextBox TB_InitAttachmentPath;
         private Button BT_InitAttachmentBrowse;
         private Button BT_InitAttachmentLoad;
         private Label LBL_InitAttachmentStatus;
+        private TextBox TB_InitFrontAttachmentPath;
+        private Button BT_InitFrontAttachmentBrowse;
+        private Button BT_InitFrontAttachmentLoad;
+        private Label LBL_InitFrontAttachmentStatus;
         private TextBox TB_InitDefectPath;
         private Button BT_InitDefectBrowse;
         private Button BT_InitDefectLoad;
@@ -147,6 +154,11 @@ namespace DemoApp
         private CancellationTokenSource captureSequenceCts;
         private bool showFrontOverlay = true;
         private int selectedFrontSequence = -1;
+        private Stopwatch cycleTimer;
+        private Label LBL_CycleTime;
+        private string currentPartID;
+        private TextBox TB_PartID;
+        private Label LBL_PartID;
         private static readonly object consoleCaptureLock = new object();
         private static bool consoleCaptureInitialized;
         private static ConsoleRedirectWriter consoleOutInterceptor;
@@ -219,6 +231,7 @@ namespace DemoApp
             LoadInitializationSettings();
             ApplyTheme();
             InitializeLogicBuilder();
+            InitializeCycleTimeLabel();
             Shown += DemoApp_Shown;
         }
 
@@ -478,6 +491,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
 
             attachmentContext = CreateModelContext("Attachment");
+            frontAttachmentContext = CreateModelContext("Front Attachment");
             defectContext = CreateModelContext("Defects");
 
             SolDL = attachmentContext.Process;
@@ -507,6 +521,16 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 attachmentContext.LoadButton = BT_InitAttachmentLoad;
                 UpdateModelStatus(attachmentContext, "Not loaded.", statusNeutralBackground, statusNeutralForeground);
                 ToggleInitButtons(attachmentContext, true);
+            }
+
+            if (frontAttachmentContext != null)
+            {
+                frontAttachmentContext.PathDisplay = TB_InitFrontAttachmentPath;
+                frontAttachmentContext.StatusDisplay = LBL_InitFrontAttachmentStatus;
+                frontAttachmentContext.BrowseButton = BT_InitFrontAttachmentBrowse;
+                frontAttachmentContext.LoadButton = BT_InitFrontAttachmentLoad;
+                UpdateModelStatus(frontAttachmentContext, "Not loaded.", statusNeutralBackground, statusNeutralForeground);
+                ToggleInitButtons(frontAttachmentContext, true);
             }
 
             if (defectContext != null)
@@ -667,6 +691,10 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 {
                     initSettings.AttachmentPath = filePath;
                 }
+                else if (context == frontAttachmentContext)
+                {
+                    initSettings.FrontAttachmentPath = filePath;
+                }
                 else if (context == defectContext)
                 {
                     initSettings.DefectPath = filePath;
@@ -732,6 +760,26 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
         }
 
+        private void BT_InitFrontAttachmentBrowse_Click(object sender, EventArgs e)
+        {
+            using (OpenFileDialog dlg = new OpenFileDialog())
+            {
+                dlg.Filter = "SolVision Project (*.tsp)|*.tsp";
+                dlg.Multiselect = false;
+                if (dlg.ShowDialog() == DialogResult.OK)
+                {
+                    TB_InitFrontAttachmentPath.Text = dlg.FileName;
+                    ToggleInitButtons(frontAttachmentContext, true);
+                    UpdateModelStatus(frontAttachmentContext, "Ready to load.", statusNeutralBackground, statusNeutralForeground);
+                    if (initSettings != null)
+                    {
+                        initSettings.FrontAttachmentPath = dlg.FileName;
+                        SaveInitializationSettings();
+                    }
+                }
+            }
+        }
+
         private async void BT_InitAttachmentLoad_Click(object sender, EventArgs e)
         {
             if (attachmentContext == null)
@@ -768,6 +816,25 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
 
             await LoadProjectAsync(defectContext, path, updateWorkflowPath: false);
+        }
+
+        private async void BT_InitFrontAttachmentLoad_Click(object sender, EventArgs e)
+        {
+            if (frontAttachmentContext == null)
+            {
+                outToLog("Front Attachment context is not ready.", LogStatus.Error);
+                return;
+            }
+
+            string path = TB_InitFrontAttachmentPath.Text;
+            if (!File.Exists(path))
+            {
+                UpdateModelStatus(frontAttachmentContext, "Project file not found.", statusFailBackground, statusFailForeground);
+                outToLog($"[Front Attachment] Project file not found: {path}", LogStatus.Error);
+                return;
+            }
+
+            await LoadProjectAsync(frontAttachmentContext, path, updateWorkflowPath: false);
         }
 
 
@@ -815,6 +882,20 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 }
             }
 
+            if (frontAttachmentContext != null && !string.IsNullOrWhiteSpace(initSettings.FrontAttachmentPath))
+            {
+                if (File.Exists(initSettings.FrontAttachmentPath))
+                {
+                    TB_InitFrontAttachmentPath.Text = initSettings.FrontAttachmentPath;
+                    ToggleInitButtons(frontAttachmentContext, true);
+                    UpdateModelStatus(frontAttachmentContext, "Ready to load (remembered).", statusNeutralBackground, statusNeutralForeground);
+                }
+                else
+                {
+                    outToLog($"[Settings] Front Attachment project not found: {initSettings.FrontAttachmentPath}", LogStatus.Warning);
+                }
+            }
+
             if (defectContext != null && !string.IsNullOrWhiteSpace(initSettings.DefectPath))
             {
                 if (File.Exists(initSettings.DefectPath))
@@ -832,6 +913,17 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             PopulateTurntablePorts();
             useRecordedRun = initSettings?.UseRecordedRun ?? false;
             recordedRunPath = initSettings?.RecordedRunPath;
+
+            // Load last used Part ID
+            if (!string.IsNullOrWhiteSpace(initSettings?.LastPartID))
+            {
+                currentPartID = initSettings.LastPartID;
+                if (TB_PartID != null && !TB_PartID.IsDisposed)
+                {
+                    TB_PartID.Text = currentPartID;
+                }
+            }
+
             UpdateRecordedRunUiState();
             UpdateInitSummary();
             AdjustRecordedRunLayout();
@@ -1583,16 +1675,60 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
         {
             string baseDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Runs");
             Directory.CreateDirectory(baseDirectory);
-            string runFolder = Path.Combine(baseDirectory, $"Run_{DateTime.Now:yyyyMMdd_HHmmssfff}");
-            Directory.CreateDirectory(runFolder);
-            Directory.CreateDirectory(Path.Combine(runFolder, "Top"));
-            Directory.CreateDirectory(Path.Combine(runFolder, "Front"));
-            Directory.CreateDirectory(Path.Combine(runFolder, "Results"));
 
-            RunSession session = new RunSession(runFolder);
+            // Create date folder: YYYY-MM-DD
+            DateTime now = DateTime.Now;
+            string dateFolder = Path.Combine(baseDirectory, now.ToString("yyyy-MM-dd"));
+            Directory.CreateDirectory(dateFolder);
+
+            // Create Part ID folder with timestamp suffix if needed
+            string partID = string.IsNullOrWhiteSpace(currentPartID) ? "Unknown" : SanitizePartID(currentPartID);
+            string partFolderName = partID;
+
+            // Check if folder already exists for this Part ID today
+            string partFolderPath = Path.Combine(dateFolder, partFolderName);
+            if (Directory.Exists(partFolderPath))
+            {
+                // Add timestamp suffix: PartID_HHmm
+                partFolderName = $"{partID}_{now:HHmm}";
+                partFolderPath = Path.Combine(dateFolder, partFolderName);
+            }
+
+            // Create run folder structure
+            Directory.CreateDirectory(partFolderPath);
+            Directory.CreateDirectory(Path.Combine(partFolderPath, "Top"));
+            Directory.CreateDirectory(Path.Combine(partFolderPath, "Front"));
+            Directory.CreateDirectory(Path.Combine(partFolderPath, "Front_Crop"));
+            Directory.CreateDirectory(Path.Combine(partFolderPath, "Results"));
+
+            RunSession session = new RunSession(partFolderPath);
             currentRunSession = session;
-            outToLog($"[Run] Created run directory: {runFolder}", LogStatus.Info);
+            outToLog($"[Run] Created run directory: {partFolderPath}", LogStatus.Info);
             return session;
+        }
+
+        private string SanitizePartID(string partID)
+        {
+            if (string.IsNullOrWhiteSpace(partID))
+            {
+                return "Unknown";
+            }
+
+            // Remove invalid file path characters
+            char[] invalidChars = Path.GetInvalidFileNameChars();
+            string sanitized = partID.Trim();
+            foreach (char c in invalidChars)
+            {
+                sanitized = sanitized.Replace(c, '_');
+            }
+
+            // Limit length
+            if (sanitized.Length > 50)
+            {
+                sanitized = sanitized.Substring(0, 50);
+            }
+
+            return string.IsNullOrWhiteSpace(sanitized) ? "Unknown" : sanitized;
         }
 
         private static Mat BitmapToMat(Bitmap bitmap)
@@ -1606,6 +1742,51 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             {
                 return image.Mat.Clone();
             }
+        }
+
+        private static Bitmap CreateCenterCrop500x500(Bitmap source, int? centerX = null, int? centerY = null)
+        {
+            if (source == null)
+            {
+                throw new ArgumentNullException(nameof(source));
+            }
+
+            const int cropWidth = 800;
+            const int cropHeight = 900;
+            const int defaultCenterX = 2736;
+            const int defaultCenterY = 2187;
+
+            int cropCenterX = centerX ?? defaultCenterX;
+            int cropCenterY = centerY ?? defaultCenterY;
+
+            int sourceWidth = source.Width;
+            int sourceHeight = source.Height;
+
+            // Calculate crop region from center point
+            int x = cropCenterX - (cropWidth / 2);
+            int y = cropCenterY - (cropHeight / 2);
+
+            // Validate crop fits within image
+            if (x < 0 || y < 0 || x + cropWidth > sourceWidth || y + cropHeight > sourceHeight)
+            {
+                throw new InvalidOperationException(
+                    $"Crop region {cropWidth}×{cropHeight} at center ({cropCenterX},{cropCenterY}) doesn't fit in source image {sourceWidth}×{sourceHeight}");
+            }
+
+            // Create crop rectangle
+            Rectangle cropRect = new Rectangle(x, y, cropWidth, cropHeight);
+
+            // Extract the cropped region
+            Bitmap cropped = new Bitmap(cropWidth, cropHeight);
+            using (Graphics g = Graphics.FromImage(cropped))
+            {
+                g.DrawImage(source,
+                    new Rectangle(0, 0, cropWidth, cropHeight),  // Destination
+                    cropRect,                                     // Source region
+                    GraphicsUnit.Pixel);
+            }
+
+            return cropped;
         }
 
         private AttachmentOverlayResult BuildAttachmentOverlay(DetectImg image)
@@ -1959,15 +2140,17 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
         private void UpdateInitSummary()
         {
             bool attachmentLoaded = attachmentContext?.IsLoaded == true;
+            bool frontAttachmentLoaded = frontAttachmentContext?.IsLoaded == true;
             bool defectLoaded = defectContext?.IsLoaded == true;
-            string attachmentLabel = attachmentLoaded ? Path.GetFileName(attachmentContext.LoadedPath) : "Attachment not loaded";
-            string defectLabel = defectLoaded ? Path.GetFileName(defectContext.LoadedPath) : "Defect not loaded";
+            string attachmentLabel = attachmentLoaded ? "Attach OK" : "No Attach";
+            string frontAttachmentLabel = frontAttachmentLoaded ? "FrontAttach OK" : "No FrontAttach";
+            string defectLabel = defectLoaded ? "Defect OK" : "No Defect";
             bool topConnected = topCameraContext?.IsConnected == true;
             bool frontConnected = frontCameraContext?.IsConnected == true;
             bool turntableConnected = turntableController?.IsConnected == true;
             bool turntableHomed = turntableController?.IsHomed == true;
             double? offset = turntableController?.LastOffsetAngle;
-            bool modelsReady = attachmentLoaded && defectLoaded;
+            bool modelsReady = attachmentLoaded && frontAttachmentLoaded && defectLoaded;
             bool camerasReady = topConnected && frontConnected;
             bool turntableReady = turntableConnected && turntableHomed;
             bool recordedReady = true;
@@ -1981,54 +2164,49 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             string turntableLabel;
             if (useRecordedRun)
             {
-                string runName = !string.IsNullOrWhiteSpace(recordedRunPath)
-                    ? new DirectoryInfo(recordedRunPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Name
-                    : "Recorded run";
                 if (recordedReady)
                 {
-                    cameraLabel = $"Recorded run ({runName})";
-                    turntableLabel = "Recorded run";
+                    cameraLabel = "Recorded";
+                    turntableLabel = "Recorded";
                 }
                 else
                 {
-                    cameraLabel = "Recorded run not ready";
-                    turntableLabel = cameraLabel;
+                    cameraLabel = "No Run";
+                    turntableLabel = "No Run";
                 }
             }
             else
             {
                 if (topConnected && frontConnected)
                 {
-                    string topName = topCameraContext?.ConnectedDevice?.DisplayName ?? "Top camera";
-                    string frontName = frontCameraContext?.ConnectedDevice?.DisplayName ?? "Front camera";
-                    cameraLabel = $"Cameras ready ({topName}; {frontName})";
+                    cameraLabel = "Cams OK";
                 }
                 else if (!topConnected && !frontConnected)
                 {
-                    cameraLabel = "Cameras disconnected";
+                    cameraLabel = "No Cams";
                 }
                 else if (!topConnected)
                 {
-                    cameraLabel = "Top camera disconnected";
+                    cameraLabel = "No Top";
                 }
                 else
                 {
-                    cameraLabel = "Front camera disconnected";
+                    cameraLabel = "No Front";
                 }
 
                 if (!turntableConnected)
                 {
-                    turntableLabel = "Turntable disconnected";
+                    turntableLabel = "No TT";
                 }
                 else if (turntableHomed)
                 {
                     turntableLabel = offset.HasValue
-                        ? $"Turntable homed ({offset.Value:0.00} deg)"
-                        : "Turntable homed";
+                        ? $"TT ({offset.Value:0.0}°)"
+                        : "TT OK";
                 }
                 else
                 {
-                    turntableLabel = "Turntable connected (not homed)";
+                    turntableLabel = "No Home";
                 }
             }
 
@@ -2037,7 +2215,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             if (LBL_StepModelsStatus != null)
             {
-                if (!attachmentLoaded && !defectLoaded)
+                if (!attachmentLoaded && !frontAttachmentLoaded && !defectLoaded)
                 {
                     SetStepStatus(LBL_StepModelsStatus, "Pending", statusNeutralBackground, statusNeutralForeground);
                 }
@@ -2099,7 +2277,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             string summaryText = ready
                 ? $"Ready: {attachmentLabel} | {defectLabel} | {cameraLabel} | {turntableLabel}"
-                : $"Attachment: {attachmentLabel} | Defect: {defectLabel} | {cameraLabel} | {turntableLabel}";
+                : $"{attachmentLabel} | {defectLabel} | {cameraLabel} | {turntableLabel}";
             Color summaryBack = ready ? statusPassBackground : statusNeutralBackground;
             Color summaryFore = ready ? statusPassForeground : statusNeutralForeground;
 
@@ -2648,6 +2826,14 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             CancelAttachmentSequence();
 
+            // Start cycle timer
+            if (cycleTimer == null)
+            {
+                cycleTimer = new Stopwatch();
+            }
+            cycleTimer.Restart();
+            UpdateCycleTimeDisplay();
+
             RunSession session = StartNewRunSession();
             if (useRecordedRun && session != null)
             {
@@ -2694,10 +2880,30 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 return false;
             }
 
+            // Validate Part ID is entered
+            if (string.IsNullOrWhiteSpace(currentPartID))
+            {
+                outToLog("Please enter a Part ID before running detection.", LogStatus.Warning);
+                MessageBox.Show(this, "Please enter a Part/Aligner ID in the text box above the Run Detection button.",
+                    "Part ID Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (TB_PartID != null && !TB_PartID.IsDisposed)
+                {
+                    TB_PartID.Focus();
+                }
+                return false;
+            }
+
             if (attachmentContext?.IsLoaded != true)
             {
                 outToLog("Please load the attachment project before running detection.", LogStatus.Warning);
                 FocusInitializeTab("Load the attachment project before running detection.");
+                return false;
+            }
+
+            if (frontAttachmentContext?.IsLoaded != true)
+            {
+                outToLog("Please load the front attachment project before running detection.", LogStatus.Warning);
+                FocusInitializeTab("Load the front attachment project before running detection.");
                 return false;
             }
 
@@ -2812,6 +3018,12 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                             else
                             {
                                 ReplacePictureBoxImage(PB_OriginalImage, currentImage.OriImg.ToBitmap());
+                            }
+
+                            // Save top attachments JSON
+                            if (currentImage.AttachmentPoints != null && currentImage.AttachmentPoints.Count > 0)
+                            {
+                                SaveTopAttachmentsJson(currentImage.AttachmentPoints, currentImage.AttachmentCenter, currentImage.OriImgPath);
                             }
                         }
                         else
@@ -3280,43 +3492,60 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             RunSession session = currentRunSession ?? StartNewRunSession();
             string sourceFrontFolder = Path.Combine(recordedRunPath, "Front");
+            string sourceCropFolder = Path.Combine(recordedRunPath, "Front_Crop");
+
             if (!Directory.Exists(sourceFrontFolder))
             {
                 return tickets;
             }
 
+            // Ensure destination folders exist
+            Directory.CreateDirectory(session.FrontFolder);
+            Directory.CreateDirectory(Path.Combine(session.Root, "Front_Crop"));
+
             foreach (AttachmentPointInfo point in points)
             {
-                string searchPattern = $"Front_Index{point.Sequence:00}*.png";
-                string sourcePath = Directory.GetFiles(sourceFrontFolder, searchPattern)
+                // Try new naming format first: *_idx_NN.png
+                string newSearchPattern = $"*_idx_{point.Sequence:00}.png";
+                string sourceOriginalPath = Directory.GetFiles(sourceFrontFolder, newSearchPattern)
                     .OrderBy(File.GetLastWriteTimeUtc)
                     .FirstOrDefault();
-                if (string.IsNullOrEmpty(sourcePath))
+
+                // Fall back to old naming format: Front_Index{NN}*.png
+                if (string.IsNullOrEmpty(sourceOriginalPath))
+                {
+                    string oldSearchPattern = $"Front_Index{point.Sequence:00}*.png";
+                    sourceOriginalPath = Directory.GetFiles(sourceFrontFolder, oldSearchPattern)
+                        .OrderBy(File.GetLastWriteTimeUtc)
+                        .FirstOrDefault();
+                }
+
+                if (string.IsNullOrEmpty(sourceOriginalPath))
                 {
                     outToLog($"[Sequence] Recorded run missing image for index {point.Sequence}.", LogStatus.Warning);
                     continue;
                 }
 
-                double angle = TryParseAngleFromFileName(sourcePath, out double parsed) ? parsed : 0.0;
-                string fileName = Path.GetFileName(sourcePath);
-                if (string.IsNullOrEmpty(fileName))
-                {
-                    fileName = $"Front_Index{point.Sequence:00}.png";
-                }
+                double angle = TryParseAngleFromFileName(sourceOriginalPath, out double parsed) ? parsed : 0.0;
+                string originalFileName = Path.GetFileName(sourceOriginalPath);
 
-                Directory.CreateDirectory(session.FrontFolder);
-                string destinationPath = Path.Combine(session.FrontFolder, fileName);
+                // Copy original to current session's Front folder
+                string destOriginalPath = Path.Combine(session.FrontFolder, originalFileName);
                 try
                 {
-                    File.Copy(sourcePath, destinationPath, true);
+                    File.Copy(sourceOriginalPath, destOriginalPath, true);
                 }
                 catch (Exception ex)
                 {
-                    outToLog($"[Sequence] Failed to copy recorded image '{sourcePath}': {ex.Message}", LogStatus.Warning);
+                    outToLog($"[Sequence] Failed to copy recorded image '{sourceOriginalPath}': {ex.Message}", LogStatus.Warning);
                     continue;
                 }
 
-                tickets.Add(new FrontCaptureTicket(point.Sequence, destinationPath, angle, File.GetLastWriteTime(sourcePath)));
+                // Note: Dynamic crops will be created during detection based on front attachment position
+                outToLog($"[Recorded] Loaded image for index {point.Sequence}, crop will be created during detection.", LogStatus.Info);
+
+                // Create ticket pointing to original image (crop will be created dynamically)
+                tickets.Add(new FrontCaptureTicket(point.Sequence, destOriginalPath, destOriginalPath, angle, File.GetLastWriteTime(sourceOriginalPath)));
             }
 
             return tickets;
@@ -3403,11 +3632,14 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 try
                 {
                     Bitmap frame = CaptureCameraFrame(frontContext, 2000);
-                    string angleToken = BuildAngleToken(physicalTarget);
-                    string filePath = Path.Combine(captureDirectory, $"Front_Index{point.Sequence:00}_{angleToken}.png");
+
+                    // Save original image to Front folder with new naming: ID_idx_NN.png
+                    string filePath = Path.Combine(captureDirectory, $"{currentPartID}_idx_{point.Sequence:00}.png");
                     frame.Save(filePath, ImageFormat.Png);
                     point.CapturedImagePath = filePath;
-                    captureTickets.Add(new FrontCaptureTicket(point.Sequence, filePath, physicalTarget, DateTime.Now));
+
+                    // Note: Crop will be created dynamically during detection based on front attachment position
+                    captureTickets.Add(new FrontCaptureTicket(point.Sequence, filePath, filePath, physicalTarget, DateTime.Now));
 
                     Bitmap uiBitmap = (Bitmap)frame.Clone();
                     frame.Dispose();
@@ -3600,12 +3832,13 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
         private async Task<List<FrontInspectionResult>> ProcessFrontCapturesAsync(List<FrontCaptureTicket> captures, CancellationToken token)
         {
-            if (captures == null || captures.Count == 0 || defectContext?.Process == null)
+            if (captures == null || captures.Count == 0 || defectContext?.Process == null || frontAttachmentContext?.Process == null)
             {
                 return new List<FrontInspectionResult>();
             }
 
             List<FrontInspectionResult> results = new List<FrontInspectionResult>(captures.Count);
+            List<FrontSequenceData> frontSequences = new List<FrontSequenceData>(); // Collect front attachment data
             await Task.Run(() =>
             {
                 foreach (FrontCaptureTicket ticket in captures)
@@ -3615,40 +3848,221 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                     {
                         BeginInvoke(new MethodInvoker(() =>
                         {
-                            outToLog($"[Defect] Processing index {ticket.Sequence}...", LogStatus.Progress);
+                            outToLog($"[FrontAttach] Processing index {ticket.Sequence}...", LogStatus.Progress);
                         }));
 
-                        List<ObjectInfo> detections;
-                        Bitmap overlayBitmap;
-                        Bitmap rawBitmap;
-                        using (Mat raw = CvInvoke.Imread(ticket.ImagePath, ImreadModes.ColorBgr))
+                        // Step 1: Load original full-resolution image
+                        using (Mat originalMat = CvInvoke.Imread(ticket.OriginalImagePath, ImreadModes.ColorBgr))
                         {
-                            if (raw == null || raw.IsEmpty)
+                            if (originalMat == null || originalMat.IsEmpty)
                             {
-                                throw new InvalidOperationException("Unable to load captured frame for defect inspection.");
+                                throw new InvalidOperationException($"Unable to load original image: {ticket.OriginalImagePath}");
                             }
 
-                            using (Mat clone = raw.Clone())
+                            // Step 2: Detect front attachments in full image
+                            List<ObjectInfo> attachments;
+                            using (Mat clone = originalMat.Clone())
                             {
-                                defectContext.Process.Detect(clone, out detections);
+                                frontAttachmentContext.Process.Detect(clone, out attachments);
                             }
 
-                            rawBitmap = raw.ToBitmap();
-                            using (Mat overlayMat = raw.Clone())
+                            if (attachments == null || attachments.Count == 0)
                             {
-                                DrawDefectAnnotations(overlayMat, detections);
-                                overlayBitmap = overlayMat.ToBitmap();
+                                BeginInvoke(new MethodInvoker(() =>
+                                {
+                                    outToLog($"[FrontAttach] Index {ticket.Sequence}: No attachments detected - skipping image.", LogStatus.Warning);
+                                }));
+                                continue;  // Skip this image
                             }
+
+                            // Step 3: Find attachment closest to center X (2736)
+                            const int targetCenterX = 2736;
+                            ObjectInfo closestAttachment = null;
+                            int closestDistance = int.MaxValue;
+
+                            // Collect all attachments for JSON export
+                            List<FrontAttachmentData> allAttachments = new List<FrontAttachmentData>();
+
+                            foreach (ObjectInfo attachment in attachments)
+                            {
+                                int attachCenterX = attachment.DisplayRec.X + attachment.DisplayRec.Width / 2;
+                                int attachCenterY = attachment.DisplayRec.Y + attachment.DisplayRec.Height / 2;
+                                int distance = Math.Abs(attachCenterX - targetCenterX);
+
+                                if (distance < closestDistance)
+                                {
+                                    closestDistance = distance;
+                                    closestAttachment = attachment;
+                                }
+
+                                // Add to collection for JSON export
+                                Rectangle bbox = attachment.DisplayRec;
+                                float confidence = attachment.confidence != 0 ? attachment.confidence : attachment.classifyScore;
+                                string className = string.IsNullOrWhiteSpace(attachment.name) ? "(unknown)" : attachment.name.Trim();
+
+                                allAttachments.Add(new FrontAttachmentData
+                                {
+                                    Center = new PointData { X = attachCenterX, Y = attachCenterY },
+                                    BoundingBox = new BoundingBoxData
+                                    {
+                                        X = bbox.X,
+                                        Y = bbox.Y,
+                                        Width = bbox.Width,
+                                        Height = bbox.Height
+                                    },
+                                    ClassName = className,
+                                    Confidence = confidence,
+                                    DistanceFromTargetCenter = distance,
+                                    IsSelectedForCrop = false  // Will update below
+                                });
+                            }
+
+                            int dynamicCenterX = closestAttachment.DisplayRec.X + closestAttachment.DisplayRec.Width / 2;
+                            int dynamicCenterY = closestAttachment.DisplayRec.Y + closestAttachment.DisplayRec.Height / 2;
+
+                            // Mark the selected attachment
+                            FrontAttachmentData selectedAttachment = allAttachments.FirstOrDefault(a =>
+                                a.DistanceFromTargetCenter == closestDistance);
+                            if (selectedAttachment != null)
+                            {
+                                selectedAttachment.IsSelectedForCrop = true;
+                            }
+
+                            BeginInvoke(new MethodInvoker(() =>
+                            {
+                                outToLog($"[FrontAttach] Index {ticket.Sequence}: Found {attachments.Count} attachment(s). Selected center ({dynamicCenterX}, {dynamicCenterY}), distance from target: {closestDistance}px", LogStatus.Info);
+                            }));
+
+                            // Step 4: Create dynamic crop based on detected attachment center
+                            Bitmap croppedBitmap;
+                            string croppedImagePath;
+                            using (Bitmap originalBitmap = originalMat.ToBitmap())
+                            {
+                                try
+                                {
+                                    croppedBitmap = CreateCenterCrop500x500(originalBitmap, dynamicCenterX, dynamicCenterY);
+
+                                    // Save dynamic crop to Front_Crop folder
+                                    string originalDir = Path.GetDirectoryName(ticket.OriginalImagePath);
+                                    string runRoot = Path.GetDirectoryName(originalDir);
+                                    string cropDir = Path.Combine(runRoot, "Front_Crop");
+                                    Directory.CreateDirectory(cropDir);
+
+                                    string originalFileName = Path.GetFileNameWithoutExtension(ticket.OriginalImagePath);
+                                    croppedImagePath = Path.Combine(cropDir, $"{originalFileName}_crop.png");
+                                    croppedBitmap.Save(croppedImagePath, ImageFormat.Png);
+
+                                    BeginInvoke(new MethodInvoker(() =>
+                                    {
+                                        outToLog($"[Crop] Index {ticket.Sequence}: Saved dynamic crop (800×900) centered at ({dynamicCenterX}, {dynamicCenterY}) -> {Path.GetFileName(croppedImagePath)}", LogStatus.Success);
+                                    }));
+                                }
+                                catch (InvalidOperationException ex)
+                                {
+                                    BeginInvoke(new MethodInvoker(() =>
+                                    {
+                                        outToLog($"[FrontAttach] Index {ticket.Sequence}: Crop failed at ({dynamicCenterX}, {dynamicCenterY}) - {ex.Message}. Skipping.", LogStatus.Error);
+                                    }));
+                                    continue;
+                                }
+                            }
+
+                            // Step 5: Run defect detection on dynamically cropped image
+                            List<ObjectInfo> detections;
+                            Bitmap overlayBitmap;
+                            Bitmap rawBitmap;
+
+                            BeginInvoke(new MethodInvoker(() =>
+                            {
+                                outToLog($"[Defect] Index {ticket.Sequence}: Running defect detection on dynamic crop...", LogStatus.Progress);
+                            }));
+
+                            using (Mat croppedMat = croppedBitmap.ToMat())
+                            {
+                                // Convert to 3-channel BGR if needed (remove alpha channel)
+                                Mat bgrMat = new Mat();
+                                if (croppedMat.NumberOfChannels == 4)
+                                {
+                                    CvInvoke.CvtColor(croppedMat, bgrMat, ColorConversion.Bgra2Bgr);
+                                }
+                                else if (croppedMat.NumberOfChannels == 1)
+                                {
+                                    CvInvoke.CvtColor(croppedMat, bgrMat, ColorConversion.Gray2Bgr);
+                                }
+                                else
+                                {
+                                    bgrMat = croppedMat.Clone();
+                                }
+
+                                // Log detailed Mat information for debugging
+                                BeginInvoke(new MethodInvoker(() =>
+                                {
+                                    outToLog($"[Defect] Index {ticket.Sequence}: Mat info - Original: {croppedMat.NumberOfChannels} channels → Converted: {bgrMat.NumberOfChannels} channels (BGR), Size: {bgrMat.Width}×{bgrMat.Height}", LogStatus.Info);
+                                }));
+
+                                using (Mat clone = bgrMat.Clone())
+                                {
+                                    // Save the exact Mat being sent to defect detection for debugging
+                                    string debugImagePath = croppedImagePath.Replace("_crop.png", "_debug_mat.png");
+                                    CvInvoke.Imwrite(debugImagePath, clone);
+
+                                    defectContext.Process.Detect(clone, out detections);
+
+                                    BeginInvoke(new MethodInvoker(() =>
+                                    {
+                                        outToLog($"[Debug] Saved Mat to disk for verification: {Path.GetFileName(debugImagePath)}", LogStatus.Info);
+                                    }));
+                                }
+
+                                BeginInvoke(new MethodInvoker(() =>
+                                {
+                                    if (detections != null && detections.Count > 0)
+                                    {
+                                        outToLog($"[Defect] Index {ticket.Sequence}: Found {detections.Count} defect(s)!", LogStatus.Warning);
+                                        foreach (var det in detections)
+                                        {
+                                            outToLog($"  - {det.name}: confidence={det.confidence:F2}, rect=({det.DisplayRec.X},{det.DisplayRec.Y},{det.DisplayRec.Width},{det.DisplayRec.Height})", LogStatus.Info);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        outToLog($"[Defect] Index {ticket.Sequence}: No defects detected (model returned 0 results)", LogStatus.Success);
+                                    }
+                                }));
+
+                                rawBitmap = (Bitmap)croppedBitmap.Clone();
+                                using (Mat overlayMat = bgrMat.Clone())
+                                {
+                                    DrawDefectAnnotations(overlayMat, detections);
+                                    overlayBitmap = overlayMat.ToBitmap();
+                                }
+
+                                bgrMat.Dispose();
+                            }
+
+                            croppedBitmap.Dispose();
+
+                            FrontInspectionResult result = new FrontInspectionResult(ticket.Sequence, croppedImagePath, ticket.AngleDegrees, ticket.CapturedAt, detections, overlayBitmap, rawBitmap);
+                            results.Add(result);
+
+                            // Store front sequence data for JSON export
+                            frontSequences.Add(new FrontSequenceData
+                            {
+                                Sequence = ticket.Sequence,
+                                ImagePath = Path.GetFileName(ticket.OriginalImagePath),
+                                AngleDegrees = ticket.AngleDegrees,
+                                AttachmentsDetected = allAttachments,
+                                SelectedAttachmentCenter = new PointData { X = dynamicCenterX, Y = dynamicCenterY },
+                                CropImagePath = Path.GetFileName(croppedImagePath)
+                            });
+
+                            BeginInvoke(new MethodInvoker(() =>
+                            {
+                                string summary = result.BuildSummary();
+                                LogStatus status = result.HasDefects ? LogStatus.Warning : LogStatus.Success;
+                                outToLog($"[Defect] Index {result.Sequence}: {summary}", status);
+                            }));
                         }
-
-                        FrontInspectionResult result = new FrontInspectionResult(ticket.Sequence, ticket.ImagePath, ticket.AngleDegrees, ticket.CapturedAt, detections, overlayBitmap, rawBitmap);
-                        results.Add(result);
-                        BeginInvoke(new MethodInvoker(() =>
-                        {
-                            string summary = result.BuildSummary();
-                            LogStatus status = result.HasDefects ? LogStatus.Warning : LogStatus.Success;
-                            outToLog($"[Defect] Index {result.Sequence}: {summary}", status);
-                        }));
                     }
                     catch (OperationCanceledException)
                     {
@@ -3665,6 +4079,13 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }, token).ConfigureAwait(false);
 
             results.Sort((a, b) => a.Sequence.CompareTo(b.Sequence));
+
+            // Save front attachments JSON
+            if (frontSequences.Count > 0)
+            {
+                SaveFrontAttachmentsJson(frontSequences);
+            }
+
             return results;
         }
 
@@ -3799,6 +4220,46 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             RefreshFrontGallery();
             UpdateFrontPreviewAndLedger();
             UpdateLogicEvaluation();
+
+            // Stop cycle timer and log result
+            if (cycleTimer != null && cycleTimer.IsRunning)
+            {
+                cycleTimer.Stop();
+                double seconds = cycleTimer.Elapsed.TotalSeconds;
+                outToLog($"[Cycle] Total cycle time: {seconds:F2} seconds", LogStatus.Info);
+                UpdateCycleTimeDisplay();
+            }
+        }
+
+        private void UpdateCycleTimeDisplay()
+        {
+            if (LBL_CycleTime == null || LBL_CycleTime.IsDisposed)
+            {
+                return;
+            }
+
+            if (cycleTimer == null)
+            {
+                LBL_CycleTime.Text = "Cycle: --";
+                return;
+            }
+
+            if (cycleTimer.IsRunning)
+            {
+                LBL_CycleTime.Text = "Cycle: Running...";
+                LBL_CycleTime.ForeColor = Color.FromArgb(245, 166, 35); // Orange
+            }
+            else if (cycleTimer.Elapsed.TotalSeconds > 0)
+            {
+                double seconds = cycleTimer.Elapsed.TotalSeconds;
+                LBL_CycleTime.Text = $"Cycle: {seconds:F2}s";
+                LBL_CycleTime.ForeColor = Color.FromArgb(27, 94, 32); // Green
+            }
+            else
+            {
+                LBL_CycleTime.Text = "Cycle: --";
+                LBL_CycleTime.ForeColor = Color.FromArgb(94, 102, 112); // Gray
+            }
         }
 
         private void WriteDefectSummaryCsv(IEnumerable<FrontInspectionResult> inspections)
@@ -3831,7 +4292,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                         }
                         else
                         {
-                            writer.WriteLine($"{result.Sequence},{result.AngleDegrees:F2},PASS,,,"); 
+                            writer.WriteLine($"{result.Sequence},{result.AngleDegrees:F2},PASS,,,");
                         }
                     }
                 }
@@ -3840,6 +4301,95 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             catch (Exception ex)
             {
                 outToLog($"[Results] Failed to write defect summary: {ex.Message}", LogStatus.Warning);
+            }
+        }
+
+        private void SaveTopAttachmentsJson(List<AttachmentPointInfo> attachmentPoints, PointF imageCenter, string imagePath)
+        {
+            if (currentRunSession == null || attachmentPoints == null)
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(currentRunSession.TopFolder);
+
+                var jsonData = new TopAttachmentsJson
+                {
+                    ImagePath = Path.GetFileName(imagePath),
+                    ImageCenter = new PointData { X = imageCenter.X, Y = imageCenter.Y },
+                    Attachments = new List<TopAttachmentData>(),
+                    Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                };
+
+                foreach (AttachmentPointInfo point in attachmentPoints)
+                {
+                    Rectangle bbox = point.Source.DisplayRec;
+                    float confidence = point.Source.confidence != 0 ? point.Source.confidence : point.Source.classifyScore;
+                    string className = string.IsNullOrWhiteSpace(point.Source.name) ? "(unknown)" : point.Source.name.Trim();
+
+                    jsonData.Attachments.Add(new TopAttachmentData
+                    {
+                        Sequence = point.Sequence,
+                        Center = new PointData { X = point.Center.X, Y = point.Center.Y },
+                        AngleDegrees = point.AngleDegrees,
+                        BoundingBox = new BoundingBoxData
+                        {
+                            X = bbox.X,
+                            Y = bbox.Y,
+                            Width = bbox.Width,
+                            Height = bbox.Height
+                        },
+                        ClassName = className,
+                        Confidence = confidence
+                    });
+                }
+
+                string jsonPath = Path.Combine(currentRunSession.TopFolder, "TopAttachments.json");
+                string jsonString = JsonConvert.SerializeObject(jsonData, Formatting.Indented);
+                File.WriteAllText(jsonPath, jsonString, Encoding.UTF8);
+
+                outToLog($"[Results] Saved top attachments to {Path.GetFileName(jsonPath)}.", LogStatus.Success);
+            }
+            catch (Exception ex)
+            {
+                outToLog($"[Results] Failed to write top attachments JSON: {ex.Message}", LogStatus.Warning);
+            }
+        }
+
+        private void SaveFrontAttachmentsJson(List<FrontSequenceData> sequences)
+        {
+            if (currentRunSession == null || sequences == null || sequences.Count == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(currentRunSession.FrontFolder);
+
+                var jsonData = new FrontAttachmentsJson
+                {
+                    Sequences = sequences.OrderBy(s => s.Sequence).ToList(),
+                    Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                };
+
+                string jsonPath = Path.Combine(currentRunSession.FrontFolder, "FrontAttachments.json");
+                string jsonString = JsonConvert.SerializeObject(jsonData, Formatting.Indented);
+                File.WriteAllText(jsonPath, jsonString, Encoding.UTF8);
+
+                BeginInvoke(new MethodInvoker(() =>
+                {
+                    outToLog($"[Results] Saved front attachments to {Path.GetFileName(jsonPath)}.", LogStatus.Success);
+                }));
+            }
+            catch (Exception ex)
+            {
+                BeginInvoke(new MethodInvoker(() =>
+                {
+                    outToLog($"[Results] Failed to write front attachments JSON: {ex.Message}", LogStatus.Warning);
+                }));
             }
         }
 
@@ -3951,8 +4501,16 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 Image imageToShow = null;
                 if (selected != null)
                 {
+                    bool hasOverlay = selected.OverlayImage != null;
+                    bool hasRaw = selected.RawImage != null;
                     imageToShow = showFrontOverlay ? selected.OverlayImage != null ? (Image)selected.OverlayImage.Clone() : null
                                                    : selected.RawImage != null ? (Image)selected.RawImage.Clone() : null;
+
+                    // Debug logging
+                    if (selected.Detections != null && selected.Detections.Count > 0)
+                    {
+                        outToLog($"[Preview] Displaying index {selected.Sequence}: ShowOverlay={showFrontOverlay}, HasOverlay={hasOverlay}, HasRaw={hasRaw}, DetectionCount={selected.Detections.Count}", LogStatus.Info);
+                    }
                 }
                 ReplacePictureBoxImage(PB_FrontPreview, imageToShow);
             }
@@ -4894,11 +5452,13 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             LBL_InitSummary = new Label
             {
                 Dock = DockStyle.Fill,
-                AutoSize = true,
+                AutoSize = false,
                 Padding = new Padding(0, 4, 12, 4),
                 TextAlign = ContentAlignment.MiddleLeft,
                 ForeColor = Color.FromArgb(94, 102, 112),
-                MaximumSize = new Size(0, 0)
+                Height = ScaleSize(32),
+                AutoEllipsis = true,
+                MaximumSize = new Size(0, ScaleSize(32))
             };
 
             if (BT_OpenInitWizard == null || BT_OpenInitWizard.IsDisposed)
@@ -5132,23 +5692,35 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             TableLayoutPanel grid = new TableLayoutPanel
             {
                 Dock = DockStyle.Top,
-                ColumnCount = 2,
+                ColumnCount = 1,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Margin = new Padding(0)
             };
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             groupInitAttachment = CreateModelGroup(
-                "Attachment Model",
+                "Attachment Model (Top View)",
                 BT_InitAttachmentBrowse_Click,
                 BT_InitAttachmentLoad_Click,
                 out TB_InitAttachmentPath,
                 out BT_InitAttachmentBrowse,
                 out BT_InitAttachmentLoad,
                 out LBL_InitAttachmentStatus);
-            groupInitAttachment.Margin = new Padding(0, 8, 8, 0);
+            groupInitAttachment.Margin = new Padding(0, 8, 0, 4);
+
+            groupInitFrontAttachment = CreateModelGroup(
+                "Front Attachment Model",
+                BT_InitFrontAttachmentBrowse_Click,
+                BT_InitFrontAttachmentLoad_Click,
+                out TB_InitFrontAttachmentPath,
+                out BT_InitFrontAttachmentBrowse,
+                out BT_InitFrontAttachmentLoad,
+                out LBL_InitFrontAttachmentStatus);
+            groupInitFrontAttachment.Margin = new Padding(0, 4, 0, 4);
 
             groupInitDefect = CreateModelGroup(
                 "Defect Model",
@@ -5158,10 +5730,11 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 out BT_InitDefectBrowse,
                 out BT_InitDefectLoad,
                 out LBL_InitDefectStatus);
-            groupInitDefect.Margin = new Padding(8, 8, 0, 0);
+            groupInitDefect.Margin = new Padding(0, 4, 0, 0);
 
             grid.Controls.Add(groupInitAttachment, 0, 0);
-            grid.Controls.Add(groupInitDefect, 1, 0);
+            grid.Controls.Add(groupInitFrontAttachment, 0, 1);
+            grid.Controls.Add(groupInitDefect, 0, 2);
 
             return grid;
         }
@@ -5613,12 +6186,14 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
         private sealed class InitializationSettings
         {
             public string AttachmentPath { get; set; }
+            public string FrontAttachmentPath { get; set; }
             public string DefectPath { get; set; }
             public string TopCameraSerial { get; set; }
             public string FrontCameraSerial { get; set; }
             public string TurntablePort { get; set; }
             public bool UseRecordedRun { get; set; }
             public string RecordedRunPath { get; set; }
+            public string LastPartID { get; set; }
 
             public static InitializationSettings Load(string path)
             {
@@ -5675,6 +6250,9 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                             case "RecordedRunPath":
                                 settings.RecordedRunPath = value;
                                 break;
+                            case "LastPartID":
+                                settings.LastPartID = value;
+                                break;
                         }
                     }
                 }
@@ -5702,6 +6280,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                 builder.AppendLine($"TurntablePort={TurntablePort ?? string.Empty}");
                 builder.AppendLine($"UseRecordedRun={UseRecordedRun}");
                 builder.AppendLine($"RecordedRunPath={RecordedRunPath ?? string.Empty}");
+                builder.AppendLine($"LastPartID={LastPartID ?? string.Empty}");
                 File.WriteAllText(path, builder.ToString());
             }
         }
@@ -6169,6 +6748,77 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
             Resize += (s, e) => PositionLoadingIndicator();
             Shown += (s, e) => PositionLoadingIndicator();
+        }
+
+        private void InitializeCycleTimeLabel()
+        {
+            if (groupStep4 == null || BT_Detect == null)
+            {
+                return;
+            }
+
+            // Increase minimum height of groupStep4
+            groupStep4.MinimumSize = new Size(0, ScaleSize(130));
+
+            // Remove BT_Detect temporarily to reorder controls properly
+            groupStep4.Controls.Remove(BT_Detect);
+
+            // Create cycle time label (at bottom - add first)
+            LBL_CycleTime = new Label
+            {
+                Dock = DockStyle.Bottom,
+                Text = "Cycle: --",
+                TextAlign = ContentAlignment.MiddleCenter,
+                Height = ScaleSize(28),
+                ForeColor = Color.FromArgb(94, 102, 112),
+                Font = ScaleFont("Segoe UI", 9F, FontStyle.Bold),
+                Padding = new Padding(0, ScaleSize(6), 0, ScaleSize(6))
+            };
+            groupStep4.Controls.Add(LBL_CycleTime);
+
+            // Create Part ID input panel (at top - add second)
+            Panel partIDPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = ScaleSize(36),
+                Padding = new Padding(ScaleSize(4), ScaleSize(6), ScaleSize(4), ScaleSize(2))
+            };
+
+            LBL_PartID = new Label
+            {
+                Text = "Part ID:",
+                Dock = DockStyle.Left,
+                Width = ScaleSize(65),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = ScaleFont("Segoe UI", 9F),
+                ForeColor = Color.FromArgb(60, 72, 88)
+            };
+
+            TB_PartID = new TextBox
+            {
+                Dock = DockStyle.Fill,
+                Font = ScaleFont("Segoe UI", 9.5F),
+                MaxLength = 50
+            };
+
+            TB_PartID.TextChanged += (s, e) =>
+            {
+                currentPartID = TB_PartID.Text?.Trim();
+                if (initSettings != null)
+                {
+                    initSettings.LastPartID = currentPartID;
+                    SaveInitializationSettings();
+                }
+            };
+
+            partIDPanel.Controls.Add(TB_PartID);
+            partIDPanel.Controls.Add(LBL_PartID);
+            groupStep4.Controls.Add(partIDPanel);
+
+            // Re-add button with Fill dock (add last so it fills remaining space)
+            BT_Detect.Dock = DockStyle.Fill;
+            BT_Detect.MinimumSize = new Size(0, ScaleSize(44));
+            groupStep4.Controls.Add(BT_Detect);
         }
 
         private void StyleGroupSurface(Control container, Color surface, Color border)
@@ -8911,16 +9561,18 @@ internal sealed class AttachmentOverlayResult
 
 internal sealed class FrontCaptureTicket
 {
-    public FrontCaptureTicket(int sequence, string imagePath, double angleDegrees, DateTime capturedAt)
+    public FrontCaptureTicket(int sequence, string imagePath, string originalImagePath, double angleDegrees, DateTime capturedAt)
     {
         Sequence = sequence;
         ImagePath = imagePath;
+        OriginalImagePath = originalImagePath;
         AngleDegrees = angleDegrees;
         CapturedAt = capturedAt;
     }
 
     public int Sequence { get; }
     public string ImagePath { get; }
+    public string OriginalImagePath { get; }
     public double AngleDegrees { get; }
     public DateTime CapturedAt { get; }
 }
@@ -9040,6 +9692,125 @@ internal class DetectImg : IDisposable
             FrontInspectionComplete = false;
         }
     }
+
+// JSON export data structures
+[Serializable]
+internal class TopAttachmentData
+{
+    [JsonProperty("sequence")]
+    public int Sequence { get; set; }
+
+    [JsonProperty("center")]
+    public PointData Center { get; set; }
+
+    [JsonProperty("angle_degrees")]
+    public double AngleDegrees { get; set; }
+
+    [JsonProperty("bounding_box")]
+    public BoundingBoxData BoundingBox { get; set; }
+
+    [JsonProperty("class_name")]
+    public string ClassName { get; set; }
+
+    [JsonProperty("confidence")]
+    public float Confidence { get; set; }
+}
+
+[Serializable]
+internal class PointData
+{
+    [JsonProperty("x")]
+    public float X { get; set; }
+
+    [JsonProperty("y")]
+    public float Y { get; set; }
+}
+
+[Serializable]
+internal class BoundingBoxData
+{
+    [JsonProperty("x")]
+    public int X { get; set; }
+
+    [JsonProperty("y")]
+    public int Y { get; set; }
+
+    [JsonProperty("width")]
+    public int Width { get; set; }
+
+    [JsonProperty("height")]
+    public int Height { get; set; }
+}
+
+[Serializable]
+internal class TopAttachmentsJson
+{
+    [JsonProperty("image_path")]
+    public string ImagePath { get; set; }
+
+    [JsonProperty("image_center")]
+    public PointData ImageCenter { get; set; }
+
+    [JsonProperty("attachments")]
+    public List<TopAttachmentData> Attachments { get; set; }
+
+    [JsonProperty("timestamp")]
+    public string Timestamp { get; set; }
+}
+
+[Serializable]
+internal class FrontAttachmentData
+{
+    [JsonProperty("center")]
+    public PointData Center { get; set; }
+
+    [JsonProperty("bounding_box")]
+    public BoundingBoxData BoundingBox { get; set; }
+
+    [JsonProperty("class_name")]
+    public string ClassName { get; set; }
+
+    [JsonProperty("confidence")]
+    public float Confidence { get; set; }
+
+    [JsonProperty("distance_from_target_center")]
+    public int DistanceFromTargetCenter { get; set; }
+
+    [JsonProperty("is_selected_for_crop")]
+    public bool IsSelectedForCrop { get; set; }
+}
+
+[Serializable]
+internal class FrontSequenceData
+{
+    [JsonProperty("sequence")]
+    public int Sequence { get; set; }
+
+    [JsonProperty("image_path")]
+    public string ImagePath { get; set; }
+
+    [JsonProperty("angle_degrees")]
+    public double AngleDegrees { get; set; }
+
+    [JsonProperty("attachments_detected")]
+    public List<FrontAttachmentData> AttachmentsDetected { get; set; }
+
+    [JsonProperty("selected_attachment_center")]
+    public PointData SelectedAttachmentCenter { get; set; }
+
+    [JsonProperty("crop_image_path")]
+    public string CropImagePath { get; set; }
+}
+
+[Serializable]
+internal class FrontAttachmentsJson
+{
+    [JsonProperty("sequences")]
+    public List<FrontSequenceData> Sequences { get; set; }
+
+    [JsonProperty("timestamp")]
+    public string Timestamp { get; set; }
+}
 }
 
 
