@@ -22,6 +22,7 @@ using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Drawing.Text;
 using MVSDK_Net;
+using Newtonsoft.Json;
 
 namespace DemoApp
 {
@@ -3018,6 +3019,12 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                             {
                                 ReplacePictureBoxImage(PB_OriginalImage, currentImage.OriImg.ToBitmap());
                             }
+
+                            // Save top attachments JSON
+                            if (currentImage.AttachmentPoints != null && currentImage.AttachmentPoints.Count > 0)
+                            {
+                                SaveTopAttachmentsJson(currentImage.AttachmentPoints, currentImage.AttachmentCenter, currentImage.OriImgPath);
+                            }
                         }
                         else
                         {
@@ -3831,6 +3838,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }
 
             List<FrontInspectionResult> results = new List<FrontInspectionResult>(captures.Count);
+            List<FrontSequenceData> frontSequences = new List<FrontSequenceData>(); // Collect front attachment data
             await Task.Run(() =>
             {
                 foreach (FrontCaptureTicket ticket in captures)
@@ -3872,9 +3880,13 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                             ObjectInfo closestAttachment = null;
                             int closestDistance = int.MaxValue;
 
+                            // Collect all attachments for JSON export
+                            List<FrontAttachmentData> allAttachments = new List<FrontAttachmentData>();
+
                             foreach (ObjectInfo attachment in attachments)
                             {
                                 int attachCenterX = attachment.DisplayRec.X + attachment.DisplayRec.Width / 2;
+                                int attachCenterY = attachment.DisplayRec.Y + attachment.DisplayRec.Height / 2;
                                 int distance = Math.Abs(attachCenterX - targetCenterX);
 
                                 if (distance < closestDistance)
@@ -3882,10 +3894,39 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                                     closestDistance = distance;
                                     closestAttachment = attachment;
                                 }
+
+                                // Add to collection for JSON export
+                                Rectangle bbox = attachment.DisplayRec;
+                                float confidence = attachment.confidence != 0 ? attachment.confidence : attachment.classifyScore;
+                                string className = string.IsNullOrWhiteSpace(attachment.name) ? "(unknown)" : attachment.name.Trim();
+
+                                allAttachments.Add(new FrontAttachmentData
+                                {
+                                    Center = new PointData { X = attachCenterX, Y = attachCenterY },
+                                    BoundingBox = new BoundingBoxData
+                                    {
+                                        X = bbox.X,
+                                        Y = bbox.Y,
+                                        Width = bbox.Width,
+                                        Height = bbox.Height
+                                    },
+                                    ClassName = className,
+                                    Confidence = confidence,
+                                    DistanceFromTargetCenter = distance,
+                                    IsSelectedForCrop = false  // Will update below
+                                });
                             }
 
                             int dynamicCenterX = closestAttachment.DisplayRec.X + closestAttachment.DisplayRec.Width / 2;
                             int dynamicCenterY = closestAttachment.DisplayRec.Y + closestAttachment.DisplayRec.Height / 2;
+
+                            // Mark the selected attachment
+                            FrontAttachmentData selectedAttachment = allAttachments.FirstOrDefault(a =>
+                                a.DistanceFromTargetCenter == closestDistance);
+                            if (selectedAttachment != null)
+                            {
+                                selectedAttachment.IsSelectedForCrop = true;
+                            }
 
                             BeginInvoke(new MethodInvoker(() =>
                             {
@@ -4003,6 +4044,18 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
 
                             FrontInspectionResult result = new FrontInspectionResult(ticket.Sequence, croppedImagePath, ticket.AngleDegrees, ticket.CapturedAt, detections, overlayBitmap, rawBitmap);
                             results.Add(result);
+
+                            // Store front sequence data for JSON export
+                            frontSequences.Add(new FrontSequenceData
+                            {
+                                Sequence = ticket.Sequence,
+                                ImagePath = Path.GetFileName(ticket.OriginalImagePath),
+                                AngleDegrees = ticket.AngleDegrees,
+                                AttachmentsDetected = allAttachments,
+                                SelectedAttachmentCenter = new PointData { X = dynamicCenterX, Y = dynamicCenterY },
+                                CropImagePath = Path.GetFileName(croppedImagePath)
+                            });
+
                             BeginInvoke(new MethodInvoker(() =>
                             {
                                 string summary = result.BuildSummary();
@@ -4026,6 +4079,13 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             }, token).ConfigureAwait(false);
 
             results.Sort((a, b) => a.Sequence.CompareTo(b.Sequence));
+
+            // Save front attachments JSON
+            if (frontSequences.Count > 0)
+            {
+                SaveFrontAttachmentsJson(frontSequences);
+            }
+
             return results;
         }
 
@@ -4232,7 +4292,7 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
                         }
                         else
                         {
-                            writer.WriteLine($"{result.Sequence},{result.AngleDegrees:F2},PASS,,,"); 
+                            writer.WriteLine($"{result.Sequence},{result.AngleDegrees:F2},PASS,,,");
                         }
                     }
                 }
@@ -4241,6 +4301,95 @@ private void DemoApp_FormClosing(object sender, FormClosingEventArgs e)
             catch (Exception ex)
             {
                 outToLog($"[Results] Failed to write defect summary: {ex.Message}", LogStatus.Warning);
+            }
+        }
+
+        private void SaveTopAttachmentsJson(List<AttachmentPointInfo> attachmentPoints, PointF imageCenter, string imagePath)
+        {
+            if (currentRunSession == null || attachmentPoints == null)
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(currentRunSession.TopFolder);
+
+                var jsonData = new TopAttachmentsJson
+                {
+                    ImagePath = Path.GetFileName(imagePath),
+                    ImageCenter = new PointData { X = imageCenter.X, Y = imageCenter.Y },
+                    Attachments = new List<TopAttachmentData>(),
+                    Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                };
+
+                foreach (AttachmentPointInfo point in attachmentPoints)
+                {
+                    Rectangle bbox = point.Source.DisplayRec;
+                    float confidence = point.Source.confidence != 0 ? point.Source.confidence : point.Source.classifyScore;
+                    string className = string.IsNullOrWhiteSpace(point.Source.name) ? "(unknown)" : point.Source.name.Trim();
+
+                    jsonData.Attachments.Add(new TopAttachmentData
+                    {
+                        Sequence = point.Sequence,
+                        Center = new PointData { X = point.Center.X, Y = point.Center.Y },
+                        AngleDegrees = point.AngleDegrees,
+                        BoundingBox = new BoundingBoxData
+                        {
+                            X = bbox.X,
+                            Y = bbox.Y,
+                            Width = bbox.Width,
+                            Height = bbox.Height
+                        },
+                        ClassName = className,
+                        Confidence = confidence
+                    });
+                }
+
+                string jsonPath = Path.Combine(currentRunSession.TopFolder, "TopAttachments.json");
+                string jsonString = JsonConvert.SerializeObject(jsonData, Formatting.Indented);
+                File.WriteAllText(jsonPath, jsonString, Encoding.UTF8);
+
+                outToLog($"[Results] Saved top attachments to {Path.GetFileName(jsonPath)}.", LogStatus.Success);
+            }
+            catch (Exception ex)
+            {
+                outToLog($"[Results] Failed to write top attachments JSON: {ex.Message}", LogStatus.Warning);
+            }
+        }
+
+        private void SaveFrontAttachmentsJson(List<FrontSequenceData> sequences)
+        {
+            if (currentRunSession == null || sequences == null || sequences.Count == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(currentRunSession.FrontFolder);
+
+                var jsonData = new FrontAttachmentsJson
+                {
+                    Sequences = sequences.OrderBy(s => s.Sequence).ToList(),
+                    Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                };
+
+                string jsonPath = Path.Combine(currentRunSession.FrontFolder, "FrontAttachments.json");
+                string jsonString = JsonConvert.SerializeObject(jsonData, Formatting.Indented);
+                File.WriteAllText(jsonPath, jsonString, Encoding.UTF8);
+
+                BeginInvoke(new MethodInvoker(() =>
+                {
+                    outToLog($"[Results] Saved front attachments to {Path.GetFileName(jsonPath)}.", LogStatus.Success);
+                }));
+            }
+            catch (Exception ex)
+            {
+                BeginInvoke(new MethodInvoker(() =>
+                {
+                    outToLog($"[Results] Failed to write front attachments JSON: {ex.Message}", LogStatus.Warning);
+                }));
             }
         }
 
@@ -9543,6 +9692,125 @@ internal class DetectImg : IDisposable
             FrontInspectionComplete = false;
         }
     }
+
+// JSON export data structures
+[Serializable]
+internal class TopAttachmentData
+{
+    [JsonProperty("sequence")]
+    public int Sequence { get; set; }
+
+    [JsonProperty("center")]
+    public PointData Center { get; set; }
+
+    [JsonProperty("angle_degrees")]
+    public double AngleDegrees { get; set; }
+
+    [JsonProperty("bounding_box")]
+    public BoundingBoxData BoundingBox { get; set; }
+
+    [JsonProperty("class_name")]
+    public string ClassName { get; set; }
+
+    [JsonProperty("confidence")]
+    public float Confidence { get; set; }
+}
+
+[Serializable]
+internal class PointData
+{
+    [JsonProperty("x")]
+    public float X { get; set; }
+
+    [JsonProperty("y")]
+    public float Y { get; set; }
+}
+
+[Serializable]
+internal class BoundingBoxData
+{
+    [JsonProperty("x")]
+    public int X { get; set; }
+
+    [JsonProperty("y")]
+    public int Y { get; set; }
+
+    [JsonProperty("width")]
+    public int Width { get; set; }
+
+    [JsonProperty("height")]
+    public int Height { get; set; }
+}
+
+[Serializable]
+internal class TopAttachmentsJson
+{
+    [JsonProperty("image_path")]
+    public string ImagePath { get; set; }
+
+    [JsonProperty("image_center")]
+    public PointData ImageCenter { get; set; }
+
+    [JsonProperty("attachments")]
+    public List<TopAttachmentData> Attachments { get; set; }
+
+    [JsonProperty("timestamp")]
+    public string Timestamp { get; set; }
+}
+
+[Serializable]
+internal class FrontAttachmentData
+{
+    [JsonProperty("center")]
+    public PointData Center { get; set; }
+
+    [JsonProperty("bounding_box")]
+    public BoundingBoxData BoundingBox { get; set; }
+
+    [JsonProperty("class_name")]
+    public string ClassName { get; set; }
+
+    [JsonProperty("confidence")]
+    public float Confidence { get; set; }
+
+    [JsonProperty("distance_from_target_center")]
+    public int DistanceFromTargetCenter { get; set; }
+
+    [JsonProperty("is_selected_for_crop")]
+    public bool IsSelectedForCrop { get; set; }
+}
+
+[Serializable]
+internal class FrontSequenceData
+{
+    [JsonProperty("sequence")]
+    public int Sequence { get; set; }
+
+    [JsonProperty("image_path")]
+    public string ImagePath { get; set; }
+
+    [JsonProperty("angle_degrees")]
+    public double AngleDegrees { get; set; }
+
+    [JsonProperty("attachments_detected")]
+    public List<FrontAttachmentData> AttachmentsDetected { get; set; }
+
+    [JsonProperty("selected_attachment_center")]
+    public PointData SelectedAttachmentCenter { get; set; }
+
+    [JsonProperty("crop_image_path")]
+    public string CropImagePath { get; set; }
+}
+
+[Serializable]
+internal class FrontAttachmentsJson
+{
+    [JsonProperty("sequences")]
+    public List<FrontSequenceData> Sequences { get; set; }
+
+    [JsonProperty("timestamp")]
+    public string Timestamp { get; set; }
+}
 }
 
 
